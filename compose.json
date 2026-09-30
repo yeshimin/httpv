@@ -1,0 +1,44 @@
+{
+  "name": "httpv-v1",
+  "services": {
+    "control": {
+      "build": "./control",
+      "environment": {
+        "HTTPV_OPENRESTY_ADMIN_URL": "http://openresty:8091",
+        "HTTPV_GATEWAY_URL": "http://openresty:8088"
+      },
+      "ports": ["8090:8090"],
+      "networks": ["internal"]
+    },
+    "openresty": {
+      "build": "./openresty",
+      "ports": ["8088:8088"],
+      "depends_on": ["control", "demo", "edge-agent"],
+      "networks": ["internal"]
+    },
+    "demo": {
+      "build": "./demo",
+      "networks": ["internal"]
+    },
+    "edge-agent": {
+      "build": "./edge-agent",
+      "environment": {
+        "HTTPV_AGENT_INPUT_ADDR": "0.0.0.0:9101",
+        "HTTPV_AGENT_CONTROL_ADDR": "control:9100",
+        "HTTPV_AGENT_METRICS_ADDR": "0.0.0.0:9102",
+        "HTTPV_AGENT_QUEUE_CAPACITY": "65536"
+      },
+      "depends_on": ["control"],
+      "networks": ["internal"]
+    },
+    "web": {
+      "build": "./web",
+      "ports": ["5173:5173"],
+      "depends_on": ["control"],
+      "networks": ["internal"]
+    }
+  },
+  "networks": {
+    "internal": {"driver": "bridge"}
+  }
+}
