@@ -1,13 +1,17 @@
 use bytes::Bytes;
+use memmap2::{MmapMut, MmapOptions};
 use socket2::SockRef;
 use std::{
+    collections::HashMap,
     env, fs, io,
     os::unix::{fs::PermissionsExt, net::UnixDatagram as StdUnixDatagram},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
+    thread,
+    time::{Duration, Instant},
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -16,6 +20,11 @@ use tokio::{
 };
 
 const HEADER_LENGTH: usize = 38;
+const RING_HEADER_LENGTH: usize = 64;
+const RING_RECORD_SIZE: usize = 2048;
+const RING_VERSION: u32 = 1;
+const RING_WRITE_OFFSET: usize = 16;
+const RING_READ_OFFSET: usize = 24;
 
 #[derive(Default)]
 struct Stats {
@@ -25,6 +34,7 @@ struct Stats {
     invalid_frames: AtomicU64,
     forward_errors: AtomicU64,
     native_socket_buffer_bytes: AtomicU64,
+    ring_events_received: AtomicU64,
 }
 
 fn setting(name: &str, fallback: &str) -> String {
@@ -40,6 +50,85 @@ fn valid_phase(code: u8) -> bool {
 
 fn valid_frame(frame: &[u8]) -> bool {
     frame.len() >= HEADER_LENGTH && &frame[0..4] == b"HTVP" && frame[4] == 1 && valid_phase(frame[5])
+}
+
+struct Ring {
+    map: MmapMut,
+    capacity: usize,
+}
+
+fn ring_atomic(map: &MmapMut, offset: usize) -> &AtomicU64 {
+    // The C module owns this fixed layout. Header offsets are eight-byte aligned.
+    unsafe { &*(map.as_ptr().add(offset).cast::<AtomicU64>()) }
+}
+
+fn ring_u32(map: &MmapMut, offset: usize) -> u32 {
+    u32::from_ne_bytes(map[offset..offset + 4].try_into().unwrap())
+}
+
+impl Ring {
+    fn open(path: &Path) -> io::Result<Self> {
+        let file = fs::OpenOptions::new().read(true).write(true).open(path)?;
+        let map = unsafe { MmapOptions::new().map_mut(&file)? };
+        if map.len() < RING_HEADER_LENGTH || &map[..4] != b"HTVR" || ring_u32(&map, 4) != RING_VERSION {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid HTTPV ring header"));
+        }
+        let record_size = ring_u32(&map, 8) as usize;
+        let capacity = ring_u32(&map, 12) as usize;
+        if record_size != RING_RECORD_SIZE || capacity == 0 || map.len() < RING_HEADER_LENGTH + record_size * capacity {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid HTTPV ring geometry"));
+        }
+        Ok(Self { map, capacity })
+    }
+
+    fn drain(&mut self, senders: &Arc<Vec<mpsc::Sender<Bytes>>>, cursor: &AtomicUsize, stats: &Stats) {
+        let write = ring_atomic(&self.map, RING_WRITE_OFFSET).load(Ordering::Acquire);
+        let mut read = ring_atomic(&self.map, RING_READ_OFFSET).load(Ordering::Acquire);
+        while read < write {
+            let offset = RING_HEADER_LENGTH + ((read as usize % self.capacity) * RING_RECORD_SIZE);
+            let frame_length = ring_u32(&self.map, offset) as usize;
+            if frame_length == 0 || frame_length > RING_RECORD_SIZE - 4 {
+                stats.invalid_frames.fetch_add(1, Ordering::Relaxed);
+            } else {
+                let frame = &self.map[offset + 4..offset + 4 + frame_length];
+                if valid_frame(frame) {
+                    stats.received.fetch_add(1, Ordering::Relaxed);
+                    stats.ring_events_received.fetch_add(1, Ordering::Relaxed);
+                    enqueue(Bytes::copy_from_slice(frame), senders, cursor, stats);
+                } else {
+                    stats.invalid_frames.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            read += 1;
+        }
+        ring_atomic(&self.map, RING_READ_OFFSET).store(read, Ordering::Release);
+    }
+}
+
+fn receive_rings(directory: String, senders: Arc<Vec<mpsc::Sender<Bytes>>>, cursor: Arc<AtomicUsize>, stats: Arc<Stats>) {
+    let directory = PathBuf::from(directory);
+    let mut rings: HashMap<PathBuf, Ring> = HashMap::new();
+    let mut last_discovery = Instant::now() - Duration::from_secs(1);
+    loop {
+        if last_discovery.elapsed() >= Duration::from_secs(1) {
+            if let Ok(entries) = fs::read_dir(&directory) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    let is_ring = path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.starts_with("telemetry.ring."));
+                    if is_ring && !rings.contains_key(&path) {
+                        if let Ok(ring) = Ring::open(&path) {
+                            rings.insert(path, ring);
+                        }
+                    }
+                }
+            }
+            last_discovery = Instant::now();
+        }
+        for ring in rings.values_mut() {
+            ring.drain(&senders, &cursor, &stats);
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
 }
 
 fn enqueue(
@@ -63,13 +152,14 @@ async fn metrics_server(stats: Arc<Stats>, address: String) -> std::io::Result<(
             let mut request = [0_u8; 1024];
             let _ = stream.read(&mut request).await;
             let body = format!(
-                "httpv_edge_events_received {}\nhttpv_edge_events_forwarded {}\nhttpv_edge_events_dropped {}\nhttpv_edge_invalid_frames {}\nhttpv_edge_forward_errors {}\nhttpv_edge_native_socket_buffer_bytes {}\n",
+                "httpv_edge_events_received {}\nhttpv_edge_events_forwarded {}\nhttpv_edge_events_dropped {}\nhttpv_edge_invalid_frames {}\nhttpv_edge_forward_errors {}\nhttpv_edge_native_socket_buffer_bytes {}\nhttpv_edge_ring_events_received {}\n",
                 stats.received.load(Ordering::Relaxed),
                 stats.forwarded.load(Ordering::Relaxed),
                 stats.dropped.load(Ordering::Relaxed),
                 stats.invalid_frames.load(Ordering::Relaxed),
                 stats.forward_errors.load(Ordering::Relaxed),
                 stats.native_socket_buffer_bytes.load(Ordering::Relaxed),
+                stats.ring_events_received.load(Ordering::Relaxed),
             );
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -143,6 +233,7 @@ fn bind_native_datagram(path: &str, receive_buffer_bytes: usize) -> io::Result<(
 async fn main() -> std::io::Result<()> {
     let socket_path = setting("HTTPV_AGENT_SOCKET_PATH", "/run/httpv/edge-agent.sock");
     let native_socket_path = setting("HTTPV_AGENT_NATIVE_SOCKET_PATH", "/run/httpv/native.sock");
+    let ring_directory = setting("HTTPV_AGENT_RING_DIRECTORY", "/run/httpv");
     let native_socket_buffer_bytes = setting("HTTPV_AGENT_NATIVE_SOCKET_BUFFER_BYTES", "8388608")
         .parse()
         .unwrap_or(8_388_608);
@@ -156,6 +247,9 @@ async fn main() -> std::io::Result<()> {
 
     if let Some(parent) = Path::new(&socket_path).parent() {
         fs::create_dir_all(parent)?;
+        // The OpenResty worker runs as an unprivileged user and creates one
+        // per-worker ring file in this dedicated local runtime directory.
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o777))?;
     }
     if Path::new(&socket_path).exists() {
         fs::remove_file(&socket_path)?;
@@ -203,6 +297,12 @@ async fn main() -> std::io::Result<()> {
     let forward_cursor = Arc::new(AtomicUsize::new(0));
 
     tokio::spawn(metrics_server(Arc::clone(&stats), metrics_address));
+    let ring_senders = Arc::clone(&senders);
+    let ring_cursor = Arc::clone(&forward_cursor);
+    let ring_stats = Arc::clone(&stats);
+    thread::Builder::new()
+        .name("httpv-ring-reader".to_string())
+        .spawn(move || receive_rings(ring_directory, ring_senders, ring_cursor, ring_stats))?;
     tokio::spawn(receive_datagrams(
         Arc::new(native_input),
         Arc::clone(&senders),

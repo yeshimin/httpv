@@ -26,6 +26,7 @@
       "environment": {
         "HTTPV_AGENT_SOCKET_PATH": "/run/httpv/edge-agent.sock",
         "HTTPV_AGENT_NATIVE_SOCKET_PATH": "/run/httpv/native.sock",
+        "HTTPV_AGENT_RING_DIRECTORY": "/run/httpv",
         "HTTPV_AGENT_NATIVE_SOCKET_BUFFER_BYTES": "8388608",
         "HTTPV_AGENT_CONTROL_ADDR": "control:9100",
         "HTTPV_AGENT_METRICS_ADDR": "0.0.0.0:9102",

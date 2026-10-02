@@ -4,9 +4,27 @@
 
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 #include <fcntl.h>
+#include <unistd.h>
 
 #define NGX_HTTP_HTTPV_INVALID_SOCKET (-1)
+#define NGX_HTTP_HTTPV_RING_VERSION 1
+#define NGX_HTTP_HTTPV_RING_HEADER_SIZE 64
+#define NGX_HTTP_HTTPV_RING_RECORD_SIZE 2048
+#define NGX_HTTP_HTTPV_RING_CAPACITY 4096
+#define NGX_HTTP_HTTPV_RING_PATH_SIZE 1024
+
+typedef struct {
+    u_char      magic[4];
+    uint32_t    version;
+    uint32_t    record_size;
+    uint32_t    capacity;
+    uint64_t    write_seq;
+    uint64_t    read_seq;
+    u_char      reserved[32];
+} ngx_http_httpv_ring_header_t;
 
 typedef struct {
     ngx_str_t       socket_path;
@@ -15,6 +33,13 @@ typedef struct {
     socklen_t       addrlen;
     ngx_atomic_t    sent;
     ngx_atomic_t    dropped;
+    ngx_str_t       ring_path;
+    ngx_int_t       ring_fd;
+    size_t          ring_size;
+    u_char          ring_file[NGX_HTTP_HTTPV_RING_PATH_SIZE];
+    ngx_http_httpv_ring_header_t *ring;
+    ngx_atomic_t    ring_enqueued;
+    ngx_atomic_t    ring_dropped;
 } ngx_http_httpv_main_conf_t;
 
 typedef struct {
@@ -26,11 +51,15 @@ static void *ngx_http_httpv_create_main_conf(ngx_conf_t *cf);
 static void *ngx_http_httpv_create_loc_conf(ngx_conf_t *cf);
 static char *ngx_http_httpv_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child);
 static char *ngx_http_httpv_set_socket(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
+static char *ngx_http_httpv_set_ring(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 static char *ngx_http_httpv_metrics(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 static ngx_int_t ngx_http_httpv_init_process(ngx_cycle_t *cycle);
 static void ngx_http_httpv_exit_process(ngx_cycle_t *cycle);
 static ngx_int_t ngx_http_httpv_log_handler(ngx_http_request_t *r);
 static ngx_int_t ngx_http_httpv_metrics_handler(ngx_http_request_t *r);
+static ngx_int_t ngx_http_httpv_init_ring(ngx_cycle_t *cycle, ngx_http_httpv_main_conf_t *mcf);
+static void ngx_http_httpv_close_ring(ngx_http_httpv_main_conf_t *mcf);
+static ngx_int_t ngx_http_httpv_ring_write(ngx_http_httpv_main_conf_t *mcf, u_char *frame, size_t frame_len);
 
 static ngx_str_t ngx_http_httpv_request_id_variable = ngx_string("httpv_request_id");
 static ngx_str_t ngx_http_httpv_subject_id_variable = ngx_string("httpv_subject_id");
@@ -41,6 +70,14 @@ static ngx_command_t ngx_http_httpv_commands[] = {
         ngx_string("httpv_native_socket"),
         NGX_HTTP_MAIN_CONF|NGX_CONF_TAKE1,
         ngx_http_httpv_set_socket,
+        NGX_HTTP_MAIN_CONF_OFFSET,
+        0,
+        NULL
+    },
+    {
+        ngx_string("httpv_native_ring"),
+        NGX_HTTP_MAIN_CONF|NGX_CONF_TAKE1,
+        ngx_http_httpv_set_ring,
         NGX_HTTP_MAIN_CONF_OFFSET,
         0,
         NULL
@@ -136,6 +173,7 @@ static void *ngx_http_httpv_create_main_conf(ngx_conf_t *cf) {
         return NULL;
     }
     conf->fd = NGX_HTTP_HTTPV_INVALID_SOCKET;
+    conf->ring_fd = NGX_HTTP_HTTPV_INVALID_SOCKET;
     return conf;
 }
 
@@ -166,6 +204,19 @@ static char *ngx_http_httpv_set_socket(ngx_conf_t *cf, ngx_command_t *cmd, void 
         return "socket path is invalid or too long";
     }
     mcf->socket_path = value[1];
+    return NGX_CONF_OK;
+}
+
+static char *ngx_http_httpv_set_ring(ngx_conf_t *cf, ngx_command_t *cmd, void *conf) {
+    ngx_http_httpv_main_conf_t *mcf = conf;
+    ngx_str_t *value = cf->args->elts;
+    if (mcf->ring_path.data != NULL) {
+        return "is duplicate";
+    }
+    if (value[1].len == 0 || value[1].len + 32 >= sizeof(mcf->ring_file)) {
+        return "ring path is invalid or too long";
+    }
+    mcf->ring_path = value[1];
     return NGX_CONF_OK;
 }
 
@@ -208,6 +259,10 @@ static ngx_int_t ngx_http_httpv_init_process(ngx_cycle_t *cycle) {
     ngx_memcpy(mcf->addr.sun_path, mcf->socket_path.data, mcf->socket_path.len);
     mcf->addr.sun_path[mcf->socket_path.len] = '\0';
     mcf->addrlen = (socklen_t) (offsetof(struct sockaddr_un, sun_path) + mcf->socket_path.len + 1);
+    if (ngx_process == NGX_PROCESS_WORKER && ngx_http_httpv_init_ring(cycle, mcf) != NGX_OK) {
+        ngx_log_error(NGX_LOG_WARN, cycle->log, 0,
+                      "httpv native ring unavailable; falling back to Unix datagram telemetry");
+    }
     return NGX_OK;
 }
 
@@ -219,10 +274,98 @@ static void ngx_http_httpv_exit_process(ngx_cycle_t *cycle) {
         return;
     }
     mcf = http_ctx->main_conf[ngx_http_httpv_module.ctx_index];
-    if (mcf && mcf->fd != NGX_HTTP_HTTPV_INVALID_SOCKET) {
-        ngx_close_socket(mcf->fd);
-        mcf->fd = NGX_HTTP_HTTPV_INVALID_SOCKET;
+    if (mcf) {
+        ngx_http_httpv_close_ring(mcf);
+        if (mcf->fd != NGX_HTTP_HTTPV_INVALID_SOCKET) {
+            ngx_close_socket(mcf->fd);
+            mcf->fd = NGX_HTTP_HTTPV_INVALID_SOCKET;
+        }
     }
+}
+
+static ngx_int_t ngx_http_httpv_init_ring(ngx_cycle_t *cycle, ngx_http_httpv_main_conf_t *mcf) {
+    u_char *path_end;
+    size_t expected_size;
+    void *mapping;
+
+    if (mcf->ring_path.len == 0 || ngx_process != NGX_PROCESS_WORKER) {
+        return NGX_DECLINED;
+    }
+    path_end = ngx_snprintf(mcf->ring_file, sizeof(mcf->ring_file), "%V.%P", &mcf->ring_path, ngx_pid);
+    if (path_end >= mcf->ring_file + sizeof(mcf->ring_file) - 1) {
+        return NGX_ERROR;
+    }
+    *path_end = '\0';
+    expected_size = NGX_HTTP_HTTPV_RING_HEADER_SIZE
+        + (NGX_HTTP_HTTPV_RING_RECORD_SIZE * NGX_HTTP_HTTPV_RING_CAPACITY);
+    mcf->ring_fd = open((const char *) mcf->ring_file, O_RDWR | O_CREAT, 0666);
+    if (mcf->ring_fd == NGX_HTTP_HTTPV_INVALID_SOCKET) {
+        ngx_log_error(NGX_LOG_WARN, cycle->log, ngx_errno, "httpv native ring open() failed");
+        return NGX_ERROR;
+    }
+    if (ftruncate(mcf->ring_fd, (off_t) expected_size) == -1) {
+        ngx_log_error(NGX_LOG_WARN, cycle->log, ngx_errno, "httpv native ring ftruncate() failed");
+        ngx_close_file(mcf->ring_fd);
+        mcf->ring_fd = NGX_HTTP_HTTPV_INVALID_SOCKET;
+        return NGX_ERROR;
+    }
+    mapping = mmap(NULL, expected_size, PROT_READ | PROT_WRITE, MAP_SHARED, mcf->ring_fd, 0);
+    if (mapping == MAP_FAILED) {
+        ngx_log_error(NGX_LOG_WARN, cycle->log, ngx_errno, "httpv native ring mmap() failed");
+        ngx_close_file(mcf->ring_fd);
+        mcf->ring_fd = NGX_HTTP_HTTPV_INVALID_SOCKET;
+        return NGX_ERROR;
+    }
+    mcf->ring = mapping;
+    mcf->ring_size = expected_size;
+    if (ngx_memcmp(mcf->ring->magic, "HTVR", 4) != 0
+        || mcf->ring->version != NGX_HTTP_HTTPV_RING_VERSION
+        || mcf->ring->record_size != NGX_HTTP_HTTPV_RING_RECORD_SIZE
+        || mcf->ring->capacity != NGX_HTTP_HTTPV_RING_CAPACITY) {
+        ngx_memzero(mcf->ring, expected_size);
+        ngx_memcpy(mcf->ring->magic, "HTVR", 4);
+        mcf->ring->version = NGX_HTTP_HTTPV_RING_VERSION;
+        mcf->ring->record_size = NGX_HTTP_HTTPV_RING_RECORD_SIZE;
+        mcf->ring->capacity = NGX_HTTP_HTTPV_RING_CAPACITY;
+        __atomic_thread_fence(__ATOMIC_RELEASE);
+    }
+    return NGX_OK;
+}
+
+static void ngx_http_httpv_close_ring(ngx_http_httpv_main_conf_t *mcf) {
+    if (mcf->ring != NULL) {
+        (void) munmap(mcf->ring, mcf->ring_size);
+        mcf->ring = NULL;
+        mcf->ring_size = 0;
+    }
+    if (mcf->ring_fd != NGX_HTTP_HTTPV_INVALID_SOCKET) {
+        ngx_close_file(mcf->ring_fd);
+        mcf->ring_fd = NGX_HTTP_HTTPV_INVALID_SOCKET;
+    }
+}
+
+static ngx_int_t ngx_http_httpv_ring_write(ngx_http_httpv_main_conf_t *mcf, u_char *frame, size_t frame_len) {
+    uint64_t write_seq;
+    uint64_t read_seq;
+    u_char *record;
+
+    if (mcf->ring == NULL || frame_len > NGX_HTTP_HTTPV_RING_RECORD_SIZE - sizeof(uint32_t)) {
+        return NGX_DECLINED;
+    }
+    write_seq = __atomic_load_n(&mcf->ring->write_seq, __ATOMIC_RELAXED);
+    read_seq = __atomic_load_n(&mcf->ring->read_seq, __ATOMIC_ACQUIRE);
+    if (write_seq - read_seq >= mcf->ring->capacity) {
+        (void) ngx_atomic_fetch_add(&mcf->ring_dropped, 1);
+        (void) ngx_atomic_fetch_add(&mcf->dropped, 1);
+        return NGX_BUSY;
+    }
+    record = (u_char *) mcf->ring + NGX_HTTP_HTTPV_RING_HEADER_SIZE
+        + ((write_seq % mcf->ring->capacity) * mcf->ring->record_size);
+    ngx_memcpy(record + sizeof(uint32_t), frame, frame_len);
+    *((uint32_t *) record) = (uint32_t) frame_len;
+    __atomic_store_n(&mcf->ring->write_seq, write_seq + 1, __ATOMIC_RELEASE);
+    (void) ngx_atomic_fetch_add(&mcf->ring_enqueued, 1);
+    return NGX_OK;
 }
 
 static ngx_int_t ngx_http_httpv_metrics_handler(ngx_http_request_t *r) {
@@ -239,7 +382,7 @@ static ngx_int_t ngx_http_httpv_metrics_handler(ngx_http_request_t *r) {
     if (mcf == NULL) {
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
-    buffer = ngx_create_temp_buf(r->pool, 256);
+    buffer = ngx_create_temp_buf(r->pool, 512);
     if (buffer == NULL) {
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
@@ -248,6 +391,11 @@ static ngx_int_t ngx_http_httpv_metrics_handler(ngx_http_request_t *r) {
                     "httpv_native_events_dropped %uA\n",
                     (ngx_atomic_uint_t) mcf->sent,
                     (ngx_atomic_uint_t) mcf->dropped);
+    p = ngx_sprintf(p,
+                    "httpv_native_ring_enqueued %uA\n"
+                    "httpv_native_ring_dropped %uA\n",
+                    (ngx_atomic_uint_t) mcf->ring_enqueued,
+                    (ngx_atomic_uint_t) mcf->ring_dropped);
     buffer->last = p;
     buffer->last_buf = 1;
     r->headers_out.status = NGX_HTTP_OK;
@@ -341,6 +489,10 @@ static ngx_int_t ngx_http_httpv_log_handler(ngx_http_request_t *r) {
         || ngx_http_httpv_put_text(&p, last, r->connection->addr_text) != NGX_OK
         || ngx_http_httpv_put_text(&p, last, action) != NGX_OK) {
         (void) ngx_atomic_fetch_add(&mcf->dropped, 1);
+        return NGX_OK;
+    }
+    if (mcf->ring != NULL) {
+        (void) ngx_http_httpv_ring_write(mcf, frame, (size_t) (p - frame));
         return NGX_OK;
     }
     sent = sendto(mcf->fd, frame, (size_t) (p - frame), MSG_DONTWAIT,
