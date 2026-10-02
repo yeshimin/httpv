@@ -4,6 +4,10 @@ HTTPV is a local prototype for real-time, per-request HTTP traffic visualization
 
 The prototype keeps enforcement inside OpenResty. The Go control service and browser UI never sit on the request forwarding path.
 
+## License
+
+HTTPV is licensed under [Apache-2.0](LICENSE).
+
 ## Performance-oriented architecture
 
 The repository now includes a Rust edge agent between OpenResty and the control service. It owns a bounded telemetry queue and publishes received, forwarded, dropped, and forwarding-error counters at `:9102` inside the container network. This is the first migration step away from an OpenResty worker directly serving observability consumers.
