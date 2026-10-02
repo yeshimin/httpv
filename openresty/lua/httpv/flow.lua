@@ -123,6 +123,9 @@ local function resolve_pending(ctx, subject)
 end
 
 function _M.access()
+  if ngx.var.httpv_native_fast_path == "1" then
+    return
+  end
   local method = ngx.req.get_method()
   local path = ngx.var.uri
   local host = ngx.var.host or ""
@@ -167,6 +170,9 @@ function _M.access()
 end
 
 function _M.response_started()
+  if ngx.var.httpv_native_fast_path == "1" then
+    return
+  end
   local ctx = ngx.ctx.httpv
   if not ctx then
     return
@@ -175,6 +181,9 @@ function _M.response_started()
 end
 
 function _M.response_finished()
+  if ngx.var.httpv_native_fast_path == "1" then
+    return
+  end
   local ctx = ngx.ctx.httpv
   if not ctx then
     return
