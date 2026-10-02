@@ -137,10 +137,27 @@ fn enqueue(
     cursor: &AtomicUsize,
     stats: &Stats,
 ) {
-    let index = cursor.fetch_add(1, Ordering::Relaxed) % senders.len();
+    let index = frame_shard(&frame, senders.len())
+        .unwrap_or_else(|| cursor.fetch_add(1, Ordering::Relaxed) % senders.len());
     if senders[index].try_send(frame).is_err() {
         stats.dropped.fetch_add(1, Ordering::Relaxed);
     }
+}
+
+fn frame_shard(frame: &[u8], shards: usize) -> Option<usize> {
+    if shards == 0 || frame.len() < HEADER_LENGTH + 2 || !valid_frame(frame) {
+        return None;
+    }
+    let request_id_length = usize::from(u16::from_be_bytes([frame[HEADER_LENGTH], frame[HEADER_LENGTH + 1]]));
+    let start = HEADER_LENGTH + 2;
+    let end = start.checked_add(request_id_length)?;
+    if end > frame.len() {
+        return None;
+    }
+    let hash = frame[start..end].iter().fold(2_166_136_261_u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(16_777_619)
+    });
+    Some(hash as usize % shards)
 }
 
 async fn metrics_server(stats: Arc<Stats>, address: String) -> std::io::Result<()> {

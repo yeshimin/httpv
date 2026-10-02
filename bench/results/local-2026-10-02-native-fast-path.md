@@ -8,6 +8,10 @@ snapshot matches, the manual gate is off, and no simple native block rule
 matches. Eligible requests bypass Lua policy orchestration and write their
 three events through the shared worker ring.
 
+> Status: this is a historical experiment, not the active default. A later
+> local verification exposed an unreliable C header-filter handoff, so the
+> fast path is disabled pending a redesigned response-start mechanism.
+
 ## Result
 
 With the corrected 1,000-RPS input for 10 seconds:

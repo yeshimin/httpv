@@ -109,7 +109,6 @@ static void ngx_http_httpv_exit_process(ngx_cycle_t *cycle);
 static ngx_int_t ngx_http_httpv_log_handler(ngx_http_request_t *r);
 static ngx_int_t ngx_http_httpv_metrics_handler(ngx_http_request_t *r);
 static ngx_int_t ngx_http_httpv_shadow_handler(ngx_http_request_t *r);
-static ngx_int_t ngx_http_httpv_header_filter(ngx_http_request_t *r);
 static ngx_int_t ngx_http_httpv_init_ring(ngx_cycle_t *cycle, ngx_http_httpv_main_conf_t *mcf);
 static void ngx_http_httpv_close_ring(ngx_http_httpv_main_conf_t *mcf);
 static ngx_int_t ngx_http_httpv_ring_write(ngx_http_httpv_main_conf_t *mcf, u_char *frame, size_t frame_len);
@@ -127,7 +126,6 @@ static ngx_str_t ngx_http_httpv_request_id_variable = ngx_string("httpv_request_
 static ngx_str_t ngx_http_httpv_subject_id_variable = ngx_string("httpv_subject_id");
 static ngx_str_t ngx_http_httpv_enabled_variable = ngx_string("httpv_native_response_telemetry");
 static ngx_str_t ngx_http_httpv_fast_path_variable_name = ngx_string("httpv_native_fast_path");
-static ngx_http_output_header_filter_pt ngx_http_httpv_next_header_filter;
 
 static ngx_command_t ngx_http_httpv_commands[] = {
     {
@@ -268,8 +266,6 @@ static ngx_int_t ngx_http_httpv_postconfiguration(ngx_conf_t *cf) {
         return NGX_ERROR;
     }
     *h = ngx_http_httpv_log_handler;
-    ngx_http_httpv_next_header_filter = ngx_http_top_header_filter;
-    ngx_http_top_header_filter = ngx_http_httpv_header_filter;
     return NGX_OK;
 }
 
@@ -623,7 +619,8 @@ static ngx_http_httpv_request_ctx_t *ngx_http_httpv_request_ctx(ngx_http_request
     if (request_id == NULL) {
         return NULL;
     }
-    p = ngx_sprintf(request_id, "%uL-%M", (uint64_t) r->connection->number, r->start_msec);
+    p = ngx_sprintf(request_id, "%uL-%ui-%M", (uint64_t) r->connection->number,
+                    r->connection->requests, r->start_msec);
     ctx->request_id.data = request_id;
     ctx->request_id.len = (size_t) (p - request_id);
     ngx_http_set_ctx(r, ctx, ngx_http_httpv_module);
@@ -697,22 +694,6 @@ static void ngx_http_httpv_emit_policy_event(ngx_http_httpv_main_conf_t *mcf, ng
     } else {
         (void) ngx_atomic_fetch_add(&mcf->sent, 1);
     }
-}
-
-static ngx_int_t ngx_http_httpv_header_filter(ngx_http_request_t *r) {
-    ngx_http_httpv_request_ctx_t *ctx = ngx_http_get_module_ctx(r, ngx_http_httpv_module);
-    ngx_http_httpv_main_conf_t *mcf;
-    ngx_str_t no_action = ngx_null_string;
-
-    if (ctx != NULL && ctx->fast_path) {
-        mcf = ngx_http_get_module_main_conf(r, ngx_http_httpv_module);
-        if (mcf != NULL) {
-            ngx_http_httpv_emit_policy_event(mcf, r, 6,
-                                              (uint16_t) (r->headers_out.status ? r->headers_out.status : r->err_status),
-                                              no_action);
-        }
-    }
-    return ngx_http_httpv_next_header_filter(r);
 }
 
 static ngx_int_t ngx_http_httpv_shadow_handler(ngx_http_request_t *r) {
@@ -884,7 +865,8 @@ static ngx_int_t ngx_http_httpv_log_handler(ngx_http_request_t *r) {
         request_id.len = variable->len;
     } else {
         p = request_id_buf;
-        p = ngx_sprintf(p, "%uL-%M", (uint64_t) r->connection->number, r->start_msec);
+        p = ngx_sprintf(p, "%uL-%ui-%M", (uint64_t) r->connection->number,
+                        r->connection->requests, r->start_msec);
         request_id.data = request_id_buf;
         request_id.len = (size_t) (p - request_id_buf);
     }

@@ -28,13 +28,13 @@ lifecycle. All other requests continue into Lua. Policy snapshots are refreshed
 within 250ms, so this is an eventually consistent acceleration layer; Lua
 remains the compatibility authority during transitions.
 
-## Native normal fast path
+## Native normal fast-path experiment
 
-For a managed request with no manual gate and no matching simple block rule,
-the C rewrite handler marks the request as native, emits `request_started`, and
-lets the proxy continue without entering Lua policy orchestration. The C header
-and log hooks emit the remaining response lifecycle events. Lua reads the
-request-scoped marker and skips only these eligible requests; gates and all
-unsupported shapes automatically retain the Lua path.
+The first native normal-path experiment matches a managed request in C, emits a
+request lifecycle through the ring, and lets Lua skip duplicate orchestration.
+It remains **disabled by default**: a later local verification exposed an
+unreliable C header-filter handoff that could stall a request. The stable
+configuration keeps Lua responsible for ordinary request start/response start,
+while C block enforcement and ring-backed completion telemetry remain active.
 
 The module is only loadable when its Nginx compatibility signature matches the host runtime. HTTPV must publish artifacts by OpenResty/Nginx version, operating system, architecture, libc, and build signature.
