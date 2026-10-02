@@ -134,6 +134,8 @@ function _M.access()
 
   local id = request_id()
   ngx.var.httpv_request_id = id
+  ngx.var.httpv_subject_id = subject.id
+  ngx.var.httpv_native_response_telemetry = subject.display ~= false and "1" or "0"
   local ctx = {
     request_id = id,
     subject_id = subject.id,
@@ -178,6 +180,9 @@ function _M.response_finished()
     return
   end
   metrics.increment("responses_total")
+  if ngx.var.httpv_native_response_telemetry == "1" then
+    return
+  end
   emit(ctx, "response_finished", {
     status = tonumber(ngx.var.status) or ngx.status,
     response_bytes = tonumber(ngx.var.body_bytes_sent) or 0,

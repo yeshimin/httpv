@@ -1,17 +1,17 @@
 use bytes::Bytes;
-use serde_json::json;
+use socket2::SockRef;
 use std::{
-    env, fs,
-    os::unix::fs::PermissionsExt,
+    env, fs, io,
+    os::unix::{fs::PermissionsExt, net::UnixDatagram as StdUnixDatagram},
     path::Path,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::{lookup_host, TcpListener, UdpSocket, UnixListener, UnixStream},
+    net::{lookup_host, TcpListener, UdpSocket, UnixDatagram, UnixListener, UnixStream},
     sync::mpsc,
 };
 
@@ -24,86 +24,34 @@ struct Stats {
     dropped: AtomicU64,
     invalid_frames: AtomicU64,
     forward_errors: AtomicU64,
+    native_socket_buffer_bytes: AtomicU64,
 }
 
 fn setting(name: &str, fallback: &str) -> String {
     env::var(name).unwrap_or_else(|_| fallback.to_string())
 }
 
-fn u16(input: &[u8]) -> u16 {
-    u16::from_be_bytes([input[0], input[1]])
-}
-
-fn u32(input: &[u8]) -> u32 {
-    u32::from_be_bytes([input[0], input[1], input[2], input[3]])
-}
-
-fn u64(input: &[u8]) -> u64 {
-    u64::from_be_bytes([input[0], input[1], input[2], input[3], input[4], input[5], input[6], input[7]])
-}
-
-fn take_text(frame: &[u8], offset: &mut usize) -> Option<String> {
-    if *offset + 2 > frame.len() {
-        return None;
-    }
-    let length = usize::from(u16(&frame[*offset..*offset + 2]));
-    *offset += 2;
-    if *offset + length > frame.len() {
-        return None;
-    }
-    let value = std::str::from_utf8(&frame[*offset..*offset + length]).ok()?.to_owned();
-    *offset += length;
-    Some(value)
-}
-
-fn phase_name(code: u8) -> Option<&'static str> {
+fn valid_phase(code: u8) -> bool {
     match code {
-        1 => Some("request_started"),
-        2 => Some("request_pending"),
-        3 => Some("request_decided"),
-        4 => Some("request_timeout"),
-        5 => Some("request_blocked"),
-        6 => Some("response_started"),
-        7 => Some("response_finished"),
-        _ => None,
+        1..=7 => true,
+        _ => false,
     }
 }
 
-fn decode_frame(frame: &[u8]) -> Option<Vec<u8>> {
-    if frame.len() < HEADER_LENGTH || &frame[0..4] != b"HTVP" || frame[4] != 1 {
-        return None;
-    }
-    let phase = phase_name(frame[5])?;
-    let timestamp_ms = u64(&frame[8..16]);
-    let request_bytes = u64(&frame[16..24]);
-    let response_bytes = u64(&frame[24..32]);
-    let status = u16(&frame[32..34]);
-    let duration_ms = u32(&frame[34..38]);
-    let mut offset = HEADER_LENGTH;
-    let request_id = take_text(frame, &mut offset)?;
-    let subject_id = take_text(frame, &mut offset)?;
-    let method = take_text(frame, &mut offset)?;
-    let path = take_text(frame, &mut offset)?;
-    let client_ip = take_text(frame, &mut offset)?;
-    let action = take_text(frame, &mut offset)?;
+fn valid_frame(frame: &[u8]) -> bool {
+    frame.len() >= HEADER_LENGTH && &frame[0..4] == b"HTVP" && frame[4] == 1 && valid_phase(frame[5])
+}
 
-    Some(
-        serde_json::to_vec(&json!({
-            "phase": phase,
-            "request_id": request_id,
-            "subject_id": subject_id,
-            "timestamp_ms": timestamp_ms,
-            "method": method,
-            "path": path,
-            "client_ip": client_ip,
-            "request_bytes": request_bytes,
-            "response_bytes": response_bytes,
-            "status": status,
-            "duration_ms": duration_ms,
-            "action": action
-        }))
-        .ok()?,
-    )
+fn enqueue(
+    frame: Bytes,
+    senders: &Arc<Vec<mpsc::Sender<Bytes>>>,
+    cursor: &AtomicUsize,
+    stats: &Stats,
+) {
+    let index = cursor.fetch_add(1, Ordering::Relaxed) % senders.len();
+    if senders[index].try_send(frame).is_err() {
+        stats.dropped.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 async fn metrics_server(stats: Arc<Stats>, address: String) -> std::io::Result<()> {
@@ -115,12 +63,13 @@ async fn metrics_server(stats: Arc<Stats>, address: String) -> std::io::Result<(
             let mut request = [0_u8; 1024];
             let _ = stream.read(&mut request).await;
             let body = format!(
-                "httpv_edge_events_received {}\nhttpv_edge_events_forwarded {}\nhttpv_edge_events_dropped {}\nhttpv_edge_invalid_frames {}\nhttpv_edge_forward_errors {}\n",
+                "httpv_edge_events_received {}\nhttpv_edge_events_forwarded {}\nhttpv_edge_events_dropped {}\nhttpv_edge_invalid_frames {}\nhttpv_edge_forward_errors {}\nhttpv_edge_native_socket_buffer_bytes {}\n",
                 stats.received.load(Ordering::Relaxed),
                 stats.forwarded.load(Ordering::Relaxed),
                 stats.dropped.load(Ordering::Relaxed),
                 stats.invalid_frames.load(Ordering::Relaxed),
                 stats.forward_errors.load(Ordering::Relaxed),
+                stats.native_socket_buffer_bytes.load(Ordering::Relaxed),
             );
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -131,13 +80,18 @@ async fn metrics_server(stats: Arc<Stats>, address: String) -> std::io::Result<(
     }
 }
 
-async fn receive_stream(mut stream: UnixStream, sender: mpsc::Sender<Bytes>, stats: Arc<Stats>) {
+async fn receive_stream(
+    mut stream: UnixStream,
+    senders: Arc<Vec<mpsc::Sender<Bytes>>>,
+    cursor: Arc<AtomicUsize>,
+    stats: Arc<Stats>,
+) {
     loop {
         let mut length = [0_u8; 4];
         if stream.read_exact(&mut length).await.is_err() {
             return;
         }
-        let frame_length = u32(&length) as usize;
+        let frame_length = u32::from_be_bytes(length) as usize;
         if frame_length == 0 || frame_length > 65_507 {
             stats.invalid_frames.fetch_add(1, Ordering::Relaxed);
             return;
@@ -147,22 +101,58 @@ async fn receive_stream(mut stream: UnixStream, sender: mpsc::Sender<Bytes>, sta
             return;
         }
         stats.received.fetch_add(1, Ordering::Relaxed);
-        let Some(event) = decode_frame(&frame) else {
+        if !valid_frame(&frame) {
             stats.invalid_frames.fetch_add(1, Ordering::Relaxed);
             continue;
-        };
-        if sender.try_send(Bytes::from(event)).is_err() {
-            stats.dropped.fetch_add(1, Ordering::Relaxed);
         }
+        enqueue(Bytes::from(frame), &senders, &cursor, &stats);
     }
+}
+
+async fn receive_datagrams(
+    input: Arc<UnixDatagram>,
+    senders: Arc<Vec<mpsc::Sender<Bytes>>>,
+    cursor: Arc<AtomicUsize>,
+    stats: Arc<Stats>,
+) {
+    let mut frame = vec![0_u8; 65_507];
+    loop {
+        let size = match input.recv(&mut frame).await {
+            Ok(size) => size,
+            Err(_) => return,
+        };
+        stats.received.fetch_add(1, Ordering::Relaxed);
+        if !valid_frame(&frame[..size]) {
+            stats.invalid_frames.fetch_add(1, Ordering::Relaxed);
+            continue;
+        }
+        enqueue(Bytes::copy_from_slice(&frame[..size]), &senders, &cursor, &stats);
+    }
+}
+
+fn bind_native_datagram(path: &str, receive_buffer_bytes: usize) -> io::Result<(UnixDatagram, usize)> {
+    let input = StdUnixDatagram::bind(path)?;
+    let socket = SockRef::from(&input);
+    socket.set_recv_buffer_size(receive_buffer_bytes)?;
+    let effective_buffer_bytes = socket.recv_buffer_size()?;
+    input.set_nonblocking(true)?;
+    Ok((UnixDatagram::from_std(input)?, effective_buffer_bytes))
 }
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let socket_path = setting("HTTPV_AGENT_SOCKET_PATH", "/run/httpv/edge-agent.sock");
+    let native_socket_path = setting("HTTPV_AGENT_NATIVE_SOCKET_PATH", "/run/httpv/native.sock");
+    let native_socket_buffer_bytes = setting("HTTPV_AGENT_NATIVE_SOCKET_BUFFER_BYTES", "8388608")
+        .parse()
+        .unwrap_or(8_388_608);
     let control_address = setting("HTTPV_AGENT_CONTROL_ADDR", "control:9100");
     let metrics_address = setting("HTTPV_AGENT_METRICS_ADDR", "0.0.0.0:9102");
     let queue_capacity = setting("HTTPV_AGENT_QUEUE_CAPACITY", "65536").parse().unwrap_or(65_536);
+    let forward_workers = setting("HTTPV_AGENT_FORWARD_WORKERS", "4")
+        .parse::<usize>()
+        .unwrap_or(4)
+        .clamp(1, 32);
 
     if let Some(parent) = Path::new(&socket_path).parent() {
         fs::create_dir_all(parent)?;
@@ -172,32 +162,61 @@ async fn main() -> std::io::Result<()> {
     }
     let input = UnixListener::bind(&socket_path)?;
     fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o666))?;
-    let output = UdpSocket::bind("0.0.0.0:0").await?;
+    if Path::new(&native_socket_path).exists() {
+        fs::remove_file(&native_socket_path)?;
+    }
+    let (native_input, effective_native_socket_buffer_bytes) = bind_native_datagram(
+        &native_socket_path,
+        native_socket_buffer_bytes,
+    )?;
+    fs::set_permissions(&native_socket_path, fs::Permissions::from_mode(0o666))?;
+    let output = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
     let control_address = lookup_host(&control_address)
         .await?
         .next()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, "control address did not resolve"))?;
     let stats = Arc::new(Stats::default());
-    let (sender, mut receiver) = mpsc::channel::<Bytes>(queue_capacity);
-
-    tokio::spawn(metrics_server(Arc::clone(&stats), metrics_address));
-
-    let forward_stats = Arc::clone(&stats);
-    tokio::spawn(async move {
-        while let Some(event) = receiver.recv().await {
-            match output.send_to(&event, control_address).await {
-                Ok(_) => {
-                    forward_stats.forwarded.fetch_add(1, Ordering::Relaxed);
-                }
-                Err(_) => {
-                    forward_stats.forward_errors.fetch_add(1, Ordering::Relaxed);
+    stats
+        .native_socket_buffer_bytes
+        .store(effective_native_socket_buffer_bytes as u64, Ordering::Relaxed);
+    let queue_per_worker = (queue_capacity / forward_workers).max(1);
+    let mut sender_list = Vec::with_capacity(forward_workers);
+    for _ in 0..forward_workers {
+        let (sender, mut receiver) = mpsc::channel::<Bytes>(queue_per_worker);
+        let forward_stats = Arc::clone(&stats);
+        let output = Arc::clone(&output);
+        sender_list.push(sender);
+        tokio::spawn(async move {
+            while let Some(event) = receiver.recv().await {
+                match output.send_to(&event, control_address).await {
+                    Ok(_) => {
+                        forward_stats.forwarded.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(_) => {
+                        forward_stats.forward_errors.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
             }
-        }
-    });
+        });
+    }
+    let senders = Arc::new(sender_list);
+    let forward_cursor = Arc::new(AtomicUsize::new(0));
+
+    tokio::spawn(metrics_server(Arc::clone(&stats), metrics_address));
+    tokio::spawn(receive_datagrams(
+        Arc::new(native_input),
+        Arc::clone(&senders),
+        Arc::clone(&forward_cursor),
+        Arc::clone(&stats),
+    ));
 
     loop {
         let (stream, _) = input.accept().await?;
-        tokio::spawn(receive_stream(stream, sender.clone(), Arc::clone(&stats)));
+        tokio::spawn(receive_stream(
+            stream,
+            Arc::clone(&senders),
+            Arc::clone(&forward_cursor),
+            Arc::clone(&stats),
+        ));
     }
 }

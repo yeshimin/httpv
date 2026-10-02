@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -72,10 +73,11 @@ type TrafficEvent struct {
 }
 
 type Store struct {
-	mu      sync.RWMutex
-	subject Subject
-	rules   map[string]Rule
-	events  []TrafficEvent
+	mu         sync.RWMutex
+	subject    Subject
+	rules      map[string]Rule
+	events     []TrafficEvent
+	eventStart int
 }
 
 func newStore() *Store {
@@ -143,10 +145,12 @@ func (s *Store) removeRule(id string) bool {
 func (s *Store) addEvent(event TrafficEvent) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.events = append(s.events, event)
-	if len(s.events) > maxRecentEvents {
-		s.events = append([]TrafficEvent(nil), s.events[len(s.events)-maxRecentEvents:]...)
+	if len(s.events) < maxRecentEvents {
+		s.events = append(s.events, event)
+		return
 	}
+	s.events[s.eventStart] = event
+	s.eventStart = (s.eventStart + 1) % maxRecentEvents
 }
 
 func (s *Store) recentEvents(limit int) []TrafficEvent {
@@ -155,9 +159,11 @@ func (s *Store) recentEvents(limit int) []TrafficEvent {
 	if limit <= 0 || limit > len(s.events) {
 		limit = len(s.events)
 	}
-	start := len(s.events) - limit
 	result := make([]TrafficEvent, limit)
-	copy(result, s.events[start:])
+	start := (s.eventStart + len(s.events) - limit) % len(s.events)
+	for i := range result {
+		result[i] = s.events[(start+i)%len(s.events)]
+	}
 	return result
 }
 
@@ -174,18 +180,21 @@ type Hub struct {
 func newHub() *Hub { return &Hub{clients: map[*client]struct{}{}} }
 
 func (h *Hub) broadcast(event TrafficEvent) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.clients) == 0 {
+		return
+	}
 	payload, err := json.Marshal(event)
 	if err != nil {
 		return
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
 	for c := range h.clients {
 		select {
 		case c.send <- payload:
 		default:
-			close(c.send)
-			delete(h.clients, c)
+			// Visualization is deliberately lossy under overload. It must never
+			// apply backpressure to the enforcement or telemetry ingestion path.
 		}
 	}
 }
@@ -332,6 +341,102 @@ func withCORS(next http.Handler) http.Handler {
 	})
 }
 
+func phaseName(code byte) (string, bool) {
+	switch code {
+	case 1:
+		return "request_started", true
+	case 2:
+		return "request_pending", true
+	case 3:
+		return "request_decided", true
+	case 4:
+		return "request_timeout", true
+	case 5:
+		return "request_blocked", true
+	case 6:
+		return "response_started", true
+	case 7:
+		return "response_finished", true
+	default:
+		return "", false
+	}
+}
+
+func takeFrameText(frame []byte, offset *int) (string, bool) {
+	if *offset+2 > len(frame) {
+		return "", false
+	}
+	length := int(binary.BigEndian.Uint16(frame[*offset : *offset+2]))
+	*offset += 2
+	if *offset+length > len(frame) {
+		return "", false
+	}
+	value := string(frame[*offset : *offset+length])
+	*offset += length
+	return value, true
+}
+
+func decodeHTVP(frame []byte) (TrafficEvent, bool) {
+	const headerLength = 38
+	if len(frame) < headerLength || !bytes.Equal(frame[:4], []byte("HTVP")) || frame[4] != 1 {
+		return TrafficEvent{}, false
+	}
+	phase, ok := phaseName(frame[5])
+	if !ok {
+		return TrafficEvent{}, false
+	}
+	offset := headerLength
+	requestID, ok := takeFrameText(frame, &offset)
+	if !ok || requestID == "" {
+		return TrafficEvent{}, false
+	}
+	subjectID, ok := takeFrameText(frame, &offset)
+	if !ok {
+		return TrafficEvent{}, false
+	}
+	method, ok := takeFrameText(frame, &offset)
+	if !ok {
+		return TrafficEvent{}, false
+	}
+	path, ok := takeFrameText(frame, &offset)
+	if !ok {
+		return TrafficEvent{}, false
+	}
+	clientIP, ok := takeFrameText(frame, &offset)
+	if !ok {
+		return TrafficEvent{}, false
+	}
+	action, ok := takeFrameText(frame, &offset)
+	if !ok || offset != len(frame) {
+		return TrafficEvent{}, false
+	}
+	return TrafficEvent{
+		Phase:         phase,
+		RequestID:     requestID,
+		SubjectID:     subjectID,
+		TimestampMS:   int64(binary.BigEndian.Uint64(frame[8:16])),
+		Method:        method,
+		Path:          path,
+		ClientIP:      clientIP,
+		RequestBytes:  int64(binary.BigEndian.Uint64(frame[16:24])),
+		ResponseBytes: int64(binary.BigEndian.Uint64(frame[24:32])),
+		Status:        int(binary.BigEndian.Uint16(frame[32:34])),
+		DurationMS:    int64(binary.BigEndian.Uint32(frame[34:38])),
+		Action:        action,
+	}, true
+}
+
+func decodeEvent(frame []byte) (TrafficEvent, bool) {
+	if event, ok := decodeHTVP(frame); ok {
+		return event, true
+	}
+	var event TrafficEvent
+	if err := json.Unmarshal(frame, &event); err != nil || event.RequestID == "" {
+		return TrafficEvent{}, false
+	}
+	return event, true
+}
+
 func serveUDP(ctx context.Context, store *Store, hub *Hub) {
 	conn, err := net.ListenUDP("udp", &net.UDPAddr{Port: 9100})
 	if err != nil {
@@ -352,8 +457,8 @@ func serveUDP(ctx context.Context, store *Store, hub *Hub) {
 			log.Printf("read UDP event: %v", err)
 			continue
 		}
-		var event TrafficEvent
-		if err := json.Unmarshal(buffer[:n], &event); err != nil || event.RequestID == "" {
+		event, ok := decodeEvent(buffer[:n])
+		if !ok {
 			continue
 		}
 		store.addEvent(event)
