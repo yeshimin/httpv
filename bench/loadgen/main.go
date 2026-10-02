@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"os"
@@ -85,6 +86,7 @@ func main() {
 					results <- result{latency: latency, err: err}
 					continue
 				}
+				_, _ = io.Copy(io.Discard, response.Body)
 				_ = response.Body.Close()
 				results <- result{latency: latency, status: response.StatusCode}
 			}

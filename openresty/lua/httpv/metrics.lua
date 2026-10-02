@@ -5,7 +5,10 @@ local metric_names = {
   "blocked_requests_total",
   "responses_total",
   "gate_pending_current",
-  "gate_pending_peak"
+  "gate_pending_peak",
+  "telemetry_events_enqueued_total",
+  "telemetry_events_sent_total",
+  "telemetry_events_dropped_total"
 }
 
 function _M.increment(name, amount)

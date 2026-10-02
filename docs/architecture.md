@@ -16,9 +16,9 @@ The edge agent is a bounded buffer between the request path and observability. I
 
 1. **Prototype** — Lua emits JSON UDP telemetry; Vue/Pixi verifies the interaction model.
 2. **Edge-agent extraction** — Rust sidecar owns buffering, forwarding, health, and telemetry-loss metrics.
-3. **Binary event protocol** — replace JSON/UDP with a versioned binary envelope over a local Unix socket.
+3. **Binary event protocol experiment** — OpenResty-to-edge-agent length-prefixed binary frames over a persistent local Unix stream socket are correct and loss-free, but the Lua publisher's measured tail latency is not acceptable for the production data path. The edge-agent-to-control hop remains JSON/UDP temporarily for compatibility.
 4. **Renderer split** — Vue remains the control shell; WebGL2 typed-array renderer owns flow and marker layers.
-5. **Native Nginx module** — move high-frequency event capture and rule snapshot lookup from Lua to a versioned Nginx module where benchmark evidence justifies the complexity.
+5. **Native Nginx module** — move high-frequency event capture and rule snapshot lookup from Lua to a versioned Nginx module. Benchmark evidence now justifies this complexity.
 6. **Distributed operation** — NATS command fan-out, ClickHouse telemetry storage, PostgreSQL configuration and audit records.
 
 ## Why the layers are separate

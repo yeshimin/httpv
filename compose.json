@@ -13,6 +13,7 @@
     "openresty": {
       "build": "./openresty",
       "ports": ["8088:8088", "127.0.0.1:8091:8091"],
+      "volumes": ["httpv_runtime:/run/httpv"],
       "depends_on": ["control", "demo", "edge-agent"],
       "networks": ["internal"]
     },
@@ -23,11 +24,12 @@
     "edge-agent": {
       "build": "./edge-agent",
       "environment": {
-        "HTTPV_AGENT_INPUT_ADDR": "0.0.0.0:9101",
+        "HTTPV_AGENT_SOCKET_PATH": "/run/httpv/edge-agent.sock",
         "HTTPV_AGENT_CONTROL_ADDR": "control:9100",
         "HTTPV_AGENT_METRICS_ADDR": "0.0.0.0:9102",
         "HTTPV_AGENT_QUEUE_CAPACITY": "65536"
       },
+      "volumes": ["httpv_runtime:/run/httpv"],
       "depends_on": ["control"],
       "ports": ["127.0.0.1:9102:9102"],
       "networks": ["internal"]
@@ -41,5 +43,8 @@
   },
   "networks": {
     "internal": {"driver": "bridge"}
+  },
+  "volumes": {
+    "httpv_runtime": {}
   }
 }
