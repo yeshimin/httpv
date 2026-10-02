@@ -706,7 +706,7 @@ func main() {
 	nativePolicy := newNativePolicyPublisher(os.Getenv("HTTPV_NATIVE_POLICY_PATH"))
 	syncGatewayConfig := func() error {
 		config := store.config()
-		if err := nativePolicy.publish(config); err != nil {
+		if _, err := nativePolicy.publish(config); err != nil {
 			return fmt.Errorf("publish native policy: %w", err)
 		}
 		return openresty.putConfig(config)
@@ -748,6 +748,9 @@ func main() {
 		writeJSON(w, http.StatusOK, map[string]any{"config": store.config(), "events": store.recentEvents(500)})
 	})
 	r.Get("/api/events", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, http.StatusOK, store.recentEvents(500)) })
+	r.Get("/api/policy-status", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, nativePolicy.status())
+	})
 	r.Post("/api/demo/burst", func(w http.ResponseWriter, r *http.Request) {
 		var payload struct {
 			Count   int `json:"count"`

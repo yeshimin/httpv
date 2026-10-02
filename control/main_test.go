@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/binary"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -154,10 +156,10 @@ func TestEncodeNativePolicy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("encode native policy: %v", err)
 	}
-	if string(policy[:4]) != "HTVC" || policy[4] != nativePolicyVersion || policy[5] != 1 || policy[6] != 1 || policy[7] != 0 || binary.BigEndian.Uint16(policy[8:10]) != 1 {
-		t.Fatalf("unexpected policy header: %v", policy[:10])
+	if string(policy[:4]) != "HTVC" || policy[4] != nativePolicyVersion || policy[5] != 1 || policy[6] != 1 || policy[7] != 0 || binary.BigEndian.Uint16(policy[8:10]) != 1 || binary.BigEndian.Uint64(policy[10:18]) != 1 {
+		t.Fatalf("unexpected policy header: %v", policy[:nativePolicyHeaderLen])
 	}
-	offset := 10
+	offset := nativePolicyHeaderLen
 	read := func() string {
 		length := int(binary.BigEndian.Uint16(policy[offset : offset+2]))
 		offset += 2
@@ -171,5 +173,31 @@ func TestEncodeNativePolicy(t *testing.T) {
 		if values[i] != want[i] {
 			t.Fatalf("field %d = %q, want %q", i, values[i], want[i])
 		}
+	}
+}
+
+func TestNativePolicyVersionAndAckStatus(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "policy.bin")
+	publisher := newNativePolicyPublisher(path)
+	config := GatewayConfig{Subjects: []Subject{{ID: "demo", Enabled: true, Display: true, Match: Match{PathPrefix: "/"}}}}
+	first, err := publisher.publish(config)
+	if err != nil || first != 1 {
+		t.Fatalf("first publish = %d, %v", first, err)
+	}
+	unchanged, err := publisher.publish(config)
+	if err != nil || unchanged != first {
+		t.Fatalf("unchanged publish = %d, %v", unchanged, err)
+	}
+	config.Subjects[0].Match.PathPrefix = "/v2"
+	second, err := publisher.publish(config)
+	if err != nil || second != 2 {
+		t.Fatalf("changed publish = %d, %v", second, err)
+	}
+	if err := os.WriteFile(path+".ack.42", []byte("2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	status := publisher.status()
+	if status.State != "active" || len(status.Acks) != 1 || status.Acks[0].Worker != "42" || status.Acks[0].Version != 2 {
+		t.Fatalf("unexpected policy status: %#v", status)
 	}
 }

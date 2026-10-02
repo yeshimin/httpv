@@ -28,6 +28,15 @@ lifecycle. All other requests continue into Lua. Policy snapshots are refreshed
 within 250ms, so this is an eventually consistent acceleration layer; Lua
 remains the compatibility authority during transitions.
 
+## Policy version and worker acknowledgement
+
+The control service assigns a monotonically increasing version only when the
+effective policy changes. Every C worker writes an acknowledgement file after
+loading a snapshot. `GET /api/policy-status` reports the published version and
+each worker's acknowledged version; the console exposes this as `Policy C vN
+active` or `syncing`. This makes native policy activation observable instead of
+assuming that a timed refresh has completed.
+
 ## Native normal fast-path experiment
 
 The first native normal-path experiment matches a managed request in C, emits a

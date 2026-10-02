@@ -45,6 +45,7 @@ typedef struct {
 
 typedef struct {
     ngx_flag_t  loaded;
+    uint64_t    version;
     ngx_flag_t  enabled;
     ngx_flag_t  display;
     ngx_flag_t  gate_enabled;
@@ -75,6 +76,7 @@ typedef struct {
     ngx_atomic_t    ring_enqueued;
     ngx_atomic_t    ring_dropped;
     ngx_str_t       policy_path;
+    u_char          policy_ack_file[NGX_HTTP_HTTPV_POLICY_PATH_SIZE];
     ngx_flag_t      policy_enforce;
     ngx_flag_t      fast_path;
     ngx_event_t     policy_event;
@@ -114,6 +116,7 @@ static void ngx_http_httpv_close_ring(ngx_http_httpv_main_conf_t *mcf);
 static ngx_int_t ngx_http_httpv_ring_write(ngx_http_httpv_main_conf_t *mcf, u_char *frame, size_t frame_len);
 static void ngx_http_httpv_policy_timer(ngx_event_t *event);
 static ngx_int_t ngx_http_httpv_reload_policy(ngx_http_httpv_main_conf_t *mcf, ngx_log_t *log);
+static void ngx_http_httpv_write_policy_ack(ngx_http_httpv_main_conf_t *mcf, ngx_log_t *log);
 static ngx_flag_t ngx_http_httpv_policy_matches(ngx_http_httpv_native_policy_t *policy, ngx_http_request_t *r);
 static ngx_flag_t ngx_http_httpv_rule_matches(ngx_http_httpv_native_rule_t *rule, ngx_http_request_t *r);
 static void ngx_http_httpv_emit_policy_event(ngx_http_httpv_main_conf_t *mcf, ngx_http_request_t *r,
@@ -411,6 +414,9 @@ static void ngx_http_httpv_exit_process(ngx_cycle_t *cycle) {
         if (mcf->policy_event.timer_set) {
             ngx_del_timer(&mcf->policy_event);
         }
+        if (mcf->policy_ack_file[0] != '\0') {
+            (void) unlink((const char *) mcf->policy_ack_file);
+        }
         ngx_http_httpv_close_ring(mcf);
         if (mcf->fd != NGX_HTTP_HTTPV_INVALID_SOCKET) {
             ngx_close_socket(mcf->fd);
@@ -521,7 +527,7 @@ static ngx_int_t ngx_http_httpv_reload_policy(ngx_http_httpv_main_conf_t *mcf, n
     }
     bytes = read(fd, buffer, sizeof(buffer));
     ngx_close_file(fd);
-    if (bytes < 10 || ngx_memcmp(buffer, "HTVC", 4) != 0 || buffer[4] != 1) {
+    if (bytes < 18 || ngx_memcmp(buffer, "HTVC", 4) != 0 || buffer[4] != 1) {
         return NGX_ERROR;
     }
     rule_count = (uint16_t) (((uint16_t) buffer[8] << 8) | buffer[9]);
@@ -533,7 +539,10 @@ static ngx_int_t ngx_http_httpv_reload_policy(ngx_http_httpv_main_conf_t *mcf, n
     next.display = buffer[6] == 1;
     next.gate_enabled = buffer[7] == 1;
     next.rule_count = rule_count;
-    cursor = buffer + 10;
+    for (index = 0; index < 8; index++) {
+        next.version = (next.version << 8) | buffer[10 + index];
+    }
+    cursor = buffer + 18;
     end = buffer + bytes;
     if (ngx_http_httpv_policy_read_text(&cursor, end, next.subject_id, sizeof(next.subject_id), &next.subject_id_value) != NGX_OK
         || ngx_http_httpv_policy_read_text(&cursor, end, next.host, sizeof(next.host), &next.host_value) != NGX_OK
@@ -554,7 +563,35 @@ static ngx_int_t ngx_http_httpv_reload_policy(ngx_http_httpv_main_conf_t *mcf, n
     }
     next.loaded = 1;
     mcf->policy = next;
+    ngx_http_httpv_write_policy_ack(mcf, log);
     return NGX_OK;
+}
+
+static void ngx_http_httpv_write_policy_ack(ngx_http_httpv_main_conf_t *mcf, ngx_log_t *log) {
+    u_char *path_end;
+    u_char body[64];
+    u_char *body_end;
+    ngx_int_t fd;
+
+    if (mcf->policy_path.len == 0 || mcf->policy_path.len + 32 >= sizeof(mcf->policy_ack_file)) {
+        return;
+    }
+    path_end = ngx_snprintf(mcf->policy_ack_file, sizeof(mcf->policy_ack_file), "%V.ack.%P",
+                            &mcf->policy_path, ngx_pid);
+    if (path_end >= mcf->policy_ack_file + sizeof(mcf->policy_ack_file) - 1) {
+        return;
+    }
+    *path_end = '\0';
+    body_end = ngx_sprintf(body, "%uL\n", mcf->policy.version);
+    fd = open((const char *) mcf->policy_ack_file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd == NGX_HTTP_HTTPV_INVALID_SOCKET) {
+        ngx_log_error(NGX_LOG_WARN, log, ngx_errno, "httpv native policy ack open() failed");
+        return;
+    }
+    if (write(fd, body, (size_t) (body_end - body)) == -1) {
+        ngx_log_error(NGX_LOG_WARN, log, ngx_errno, "httpv native policy ack write() failed");
+    }
+    ngx_close_file(fd);
 }
 
 static void ngx_http_httpv_policy_timer(ngx_event_t *event) {
@@ -791,6 +828,7 @@ static ngx_int_t ngx_http_httpv_metrics_handler(ngx_http_request_t *r) {
                     "httpv_native_ring_enqueued %uA\n"
                     "httpv_native_ring_dropped %uA\n"
                     "httpv_native_policy_loaded %ui\n"
+                    "httpv_native_policy_version %uL\n"
                     "httpv_native_policy_matches %uA\n"
                     "httpv_native_policy_block_matches %uA\n"
                     "httpv_native_policy_enforced %uA\n"
@@ -798,6 +836,7 @@ static ngx_int_t ngx_http_httpv_metrics_handler(ngx_http_request_t *r) {
                     (ngx_atomic_uint_t) mcf->ring_enqueued,
                     (ngx_atomic_uint_t) mcf->ring_dropped,
                     mcf->policy.loaded,
+                    mcf->policy.version,
                     (ngx_atomic_uint_t) mcf->policy_matches,
                     (ngx_atomic_uint_t) mcf->policy_block_matches,
                     (ngx_atomic_uint_t) mcf->policy_enforced,

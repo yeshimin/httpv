@@ -71,12 +71,44 @@ class ConsoleE2E(unittest.TestCase):
         self.assertGreater(canvas.evaluate("node => node.clientHeight"), 300)
         self.assertEqual(self.page.locator(".lane-label").all_text_contents(), ["Client", "OpenResty", "Upstream"])
 
+    def test_native_policy_has_worker_ack(self):
+        deadline = time.time() + 5
+        while True:
+            _, raw = api("GET", "/api/policy-status")
+            status = json.loads(raw)
+            if status["state"] == "active":
+                break
+            if time.time() >= deadline:
+                self.fail(f"policy did not activate: {status}")
+            time.sleep(0.1)
+        self.assertGreaterEqual(status["version"], 1)
+        self.assertGreaterEqual(len(status["acks"]), 1)
+
     def test_timeout_block_completes_without_aggregation(self):
         api("PUT", "/api/subjects/demo-api", subject(True, 100, "block"))
         self.page.reload(wait_until="networkidle")
         self.page.get_by_role("button", name=re.compile("发送当前请求|Send current request")).click()
         expect(self.page.locator(".flow-status")).to_contain_text(re.compile("已完成：403|Completed: 403"), timeout=5_000)
         self.assertEqual(self.page.locator(".overload-strip").count(), 0)
+
+    def test_manual_block_decision_completes(self):
+        api("PUT", "/api/subjects/demo-api", subject(True, 5_000, "block"))
+        self.page.reload(wait_until="networkidle")
+        api("POST", "/api/demo/burst", {"count": 1, "delay_ms": 0})
+        deadline = time.time() + 5
+        request_id = None
+        while time.time() < deadline:
+            _, raw = api("GET", "/api/events")
+            for event in reversed(json.loads(raw)):
+                if event.get("phase") == "request_pending":
+                    request_id = event["request_id"]
+                    break
+            if request_id:
+                break
+            time.sleep(0.1)
+        self.assertIsNotNone(request_id, "request did not enter the manual gate")
+        api("POST", f"/api/pending/{request_id}", {"action": "block"})
+        expect(self.page.locator(".flow-status")).to_contain_text(re.compile("已完成：403|Completed: 403"), timeout=5_000)
 
     def test_high_traffic_shows_aggregation(self):
         def burst(_):

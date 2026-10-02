@@ -15,6 +15,7 @@ type TrafficSummary = {
   type: 'traffic_summary'; window_start_ms: number; window_end_ms: number; total: number; started: number; responded: number;
   finished: number; pending: number; blocked: number; paths: TrafficSummaryPath[]
 }
+type NativePolicyStatus = { version: number; state: 'active' | 'pending' | 'unpublished' | 'disabled'; acks: { worker: string; version: number }[] }
 
 type Locale = 'zh' | 'en'
 const messages: Record<Locale, Record<string, string>> = {
@@ -37,7 +38,8 @@ const messages: Record<Locale, Record<string, string>> = {
     allowedForwarding: '已放行——正在转发上游并等待响应。', dragSelect: '在画布空白处拖拽可框选多个请求', selectedCount: '已选 {count} 条请求',
     selectedPending: '其中 {count} 条仍待人工决定', batchHistory: '这些请求已经结束；只能为后续同类流量创建规则。', allowSelected: '放行选中待决请求', blockSelected: '阻断选中待决请求', blockSelectedFuture: '阻断选中路径的后续流量',
     burst: '并发 20 条', emergencyBlock: '紧急阻断全部待决', rendering: '绘制 {shown}/{total}',
-    overloadMode: '高流量聚合', overloadSummary: '已聚合 {total} 个普通事件 · {rate}/秒', overloadHint: '待决和阻断请求仍逐条展示、可直接操作。', blockFlow: '阻断此流量'
+    overloadMode: '高流量聚合', overloadSummary: '已聚合 {total} 个普通事件 · {rate}/秒', overloadHint: '待决和阻断请求仍逐条展示、可直接操作。', blockFlow: '阻断此流量',
+    policyActive: '策略 C v{version} 已生效', policyPending: '策略 C v{version} 同步中', policyDisabled: '策略 C 未启用'
   },
   en: {
     commandSurface: 'Traffic command surface', connecting: 'connecting', live: 'live', closed: 'closed',
@@ -58,7 +60,8 @@ const messages: Record<Locale, Record<string, string>> = {
     allowedForwarding: 'Allowed — forwarding to the upstream and awaiting its response.', dragSelect: 'Drag across empty canvas space to box-select requests', selectedCount: '{count} requests selected',
     selectedPending: '{count} still waiting for a decision', batchHistory: 'These requests have completed; only future-match rules can be created.', allowSelected: 'Allow selected pending', blockSelected: 'Block selected pending', blockSelectedFuture: 'Block future traffic for selected paths',
     burst: 'Burst ×20', emergencyBlock: 'Emergency block all waiting', rendering: 'rendering {shown}/{total}',
-    overloadMode: 'High-traffic aggregation', overloadSummary: '{total} ordinary events aggregated · {rate}/s', overloadHint: 'Waiting and blocked requests remain individually visible and actionable.', blockFlow: 'Block this flow'
+    overloadMode: 'High-traffic aggregation', overloadSummary: '{total} ordinary events aggregated · {rate}/s', overloadHint: 'Waiting and blocked requests remain individually visible and actionable.', blockFlow: 'Block this flow',
+    policyActive: 'Policy C v{version} active', policyPending: 'Policy C v{version} syncing', policyDisabled: 'Policy C disabled'
   }
 }
 
@@ -79,8 +82,10 @@ const locale = ref<Locale>(localStorage.getItem('httpv-locale') === 'en' ? 'en' 
 const nowMs = ref(Date.now())
 const burstBusy = ref(false)
 const overloadSummary = ref<TrafficSummary>()
+const policyStatus = ref<NativePolicyStatus>({ version: 0, state: 'unpublished', acks: [] })
 let socket: WebSocket | undefined
 let clockTimer: number | undefined
+let policyTimer: number | undefined
 let eventFrame: number | undefined
 const eventQueue: EventMessage[] = []
 
@@ -140,6 +145,11 @@ const selectedPendingLabel = computed(() => {
 })
 const latestRecord = computed(() => records.value.at(-1))
 const overloadActive = computed(() => Boolean(overloadSummary.value && nowMs.value - overloadSummary.value.window_end_ms < 1_500))
+const policyLabel = computed(() => {
+  if (policyStatus.value.state === 'active') return t('policyActive', { version: policyStatus.value.version })
+  if (policyStatus.value.state === 'pending') return t('policyPending', { version: policyStatus.value.version })
+  return t('policyDisabled')
+})
 const flowStatus = computed(() => {
   const record = latestRecord.value
   if (!record) return t('ready')
@@ -219,6 +229,15 @@ async function bootstrap() {
     if (!keepPending && record.startedAt < cutoff) next.delete(id)
   }
   traffic.value = next
+}
+
+async function refreshPolicyStatus() {
+  try {
+    const response = await fetch('/api/policy-status')
+    if (response.ok) policyStatus.value = await response.json() as NativePolicyStatus
+  } catch {
+    // Policy status is advisory; a transient control-plane read must not affect traffic control.
+  }
 }
 
 function connect() {
@@ -360,12 +379,15 @@ async function runGuidedDemo() {
 
 onMounted(async () => {
   clockTimer = window.setInterval(() => { nowMs.value = Date.now() }, 250)
+  policyTimer = window.setInterval(refreshPolicyStatus, 1_000)
   try { await bootstrap() } catch (error) { console.error(error) }
+  await refreshPolicyStatus()
   connect()
 })
 onBeforeUnmount(() => {
   socket?.close()
   if (clockTimer) window.clearInterval(clockTimer)
+  if (policyTimer) window.clearInterval(policyTimer)
   if (eventFrame !== undefined) window.cancelAnimationFrame(eventFrame)
 })
 </script>
@@ -375,6 +397,7 @@ onBeforeUnmount(() => {
     <header class="topbar">
       <p class="eyebrow">HTTPV / LOCAL PROTOTYPE</p>
       <div class="topbar-right">
+        <div class="policy-state" :class="policyStatus.state">{{ policyLabel }}</div>
         <label class="language-picker"><span>{{ t('language') }}</span><select :value="locale" @change="onLocaleChange"><option value="zh">中文</option><option value="en">English</option></select></label>
         <div class="status" :class="connectionState"><span></span>{{ t(connectionState) }}</div>
       </div>
