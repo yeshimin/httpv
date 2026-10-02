@@ -75,10 +75,12 @@ typedef struct {
     ngx_atomic_t    ring_enqueued;
     ngx_atomic_t    ring_dropped;
     ngx_str_t       policy_path;
+    ngx_flag_t      policy_enforce;
     ngx_event_t     policy_event;
     ngx_http_httpv_native_policy_t policy;
     ngx_atomic_t    policy_matches;
     ngx_atomic_t    policy_block_matches;
+    ngx_atomic_t    policy_enforced;
 } ngx_http_httpv_main_conf_t;
 
 typedef struct {
@@ -92,6 +94,7 @@ static char *ngx_http_httpv_merge_loc_conf(ngx_conf_t *cf, void *parent, void *c
 static char *ngx_http_httpv_set_socket(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 static char *ngx_http_httpv_set_ring(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 static char *ngx_http_httpv_set_policy(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
+static char *ngx_http_httpv_init_main_conf(ngx_conf_t *cf, void *conf);
 static char *ngx_http_httpv_metrics(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 static ngx_int_t ngx_http_httpv_init_process(ngx_cycle_t *cycle);
 static void ngx_http_httpv_exit_process(ngx_cycle_t *cycle);
@@ -105,6 +108,8 @@ static void ngx_http_httpv_policy_timer(ngx_event_t *event);
 static ngx_int_t ngx_http_httpv_reload_policy(ngx_http_httpv_main_conf_t *mcf, ngx_log_t *log);
 static ngx_flag_t ngx_http_httpv_policy_matches(ngx_http_httpv_native_policy_t *policy, ngx_http_request_t *r);
 static ngx_flag_t ngx_http_httpv_rule_matches(ngx_http_httpv_native_rule_t *rule, ngx_http_request_t *r);
+static void ngx_http_httpv_emit_policy_event(ngx_http_httpv_main_conf_t *mcf, ngx_http_request_t *r,
+                                              u_char phase, uint16_t status, ngx_str_t action);
 
 static ngx_str_t ngx_http_httpv_request_id_variable = ngx_string("httpv_request_id");
 static ngx_str_t ngx_http_httpv_subject_id_variable = ngx_string("httpv_subject_id");
@@ -136,6 +141,14 @@ static ngx_command_t ngx_http_httpv_commands[] = {
         NULL
     },
     {
+        ngx_string("httpv_native_policy_enforce"),
+        NGX_HTTP_MAIN_CONF|NGX_CONF_FLAG,
+        ngx_conf_set_flag_slot,
+        NGX_HTTP_MAIN_CONF_OFFSET,
+        offsetof(ngx_http_httpv_main_conf_t, policy_enforce),
+        NULL
+    },
+    {
         ngx_string("httpv_native_telemetry"),
         NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_FLAG,
         ngx_conf_set_flag_slot,
@@ -158,7 +171,7 @@ static ngx_http_module_t ngx_http_httpv_module_ctx = {
     NULL,
     ngx_http_httpv_postconfiguration,
     ngx_http_httpv_create_main_conf,
-    NULL,
+    ngx_http_httpv_init_main_conf,
     NULL,
     NULL,
     ngx_http_httpv_create_loc_conf,
@@ -232,7 +245,14 @@ static void *ngx_http_httpv_create_main_conf(ngx_conf_t *cf) {
     }
     conf->fd = NGX_HTTP_HTTPV_INVALID_SOCKET;
     conf->ring_fd = NGX_HTTP_HTTPV_INVALID_SOCKET;
+    conf->policy_enforce = NGX_CONF_UNSET;
     return conf;
+}
+
+static char *ngx_http_httpv_init_main_conf(ngx_conf_t *cf, void *conf) {
+    ngx_http_httpv_main_conf_t *mcf = conf;
+    ngx_conf_init_value(mcf->policy_enforce, 0);
+    return NGX_CONF_OK;
 }
 
 static void *ngx_http_httpv_create_loc_conf(ngx_conf_t *cf) {
@@ -548,6 +568,58 @@ static ngx_flag_t ngx_http_httpv_rule_matches(ngx_http_httpv_native_rule_t *rule
     return 1;
 }
 
+static void ngx_http_httpv_emit_policy_event(ngx_http_httpv_main_conf_t *mcf, ngx_http_request_t *r,
+                                              u_char phase, uint16_t status, ngx_str_t action) {
+    u_char request_id_buffer[64];
+    u_char frame[2048];
+    u_char *p;
+    u_char *last;
+    ngx_time_t *tp;
+    ngx_str_t request_id;
+    uint64_t timestamp;
+    uint32_t duration;
+    ssize_t sent;
+
+    p = request_id_buffer;
+    p = ngx_sprintf(p, "%uL-%M", (uint64_t) r->connection->number, r->start_msec);
+    request_id.data = request_id_buffer;
+    request_id.len = (size_t) (p - request_id_buffer);
+    tp = ngx_timeofday();
+    timestamp = ((uint64_t) tp->sec * 1000) + tp->msec;
+    duration = (uint32_t) (ngx_current_msec - r->start_msec);
+    p = frame;
+    last = frame + sizeof(frame);
+    *p++ = 'H'; *p++ = 'T'; *p++ = 'V'; *p++ = 'P';
+    *p++ = 1;
+    *p++ = phase;
+    ngx_http_httpv_put_u16(&p, 0);
+    ngx_http_httpv_put_u64(&p, timestamp);
+    ngx_http_httpv_put_u64(&p, r->request_length);
+    ngx_http_httpv_put_u64(&p, 0);
+    ngx_http_httpv_put_u16(&p, status);
+    ngx_http_httpv_put_u32(&p, duration);
+    if (ngx_http_httpv_put_text(&p, last, request_id) != NGX_OK
+        || ngx_http_httpv_put_text(&p, last, mcf->policy.subject_id_value) != NGX_OK
+        || ngx_http_httpv_put_text(&p, last, r->method_name) != NGX_OK
+        || ngx_http_httpv_put_text(&p, last, r->uri) != NGX_OK
+        || ngx_http_httpv_put_text(&p, last, r->connection->addr_text) != NGX_OK
+        || ngx_http_httpv_put_text(&p, last, action) != NGX_OK) {
+        (void) ngx_atomic_fetch_add(&mcf->dropped, 1);
+        return;
+    }
+    if (mcf->ring != NULL) {
+        (void) ngx_http_httpv_ring_write(mcf, frame, (size_t) (p - frame));
+        return;
+    }
+    sent = sendto(mcf->fd, frame, (size_t) (p - frame), MSG_DONTWAIT,
+                  (struct sockaddr *) &mcf->addr, mcf->addrlen);
+    if (sent == -1) {
+        (void) ngx_atomic_fetch_add(&mcf->dropped, 1);
+    } else {
+        (void) ngx_atomic_fetch_add(&mcf->sent, 1);
+    }
+}
+
 static ngx_int_t ngx_http_httpv_shadow_handler(ngx_http_request_t *r) {
     ngx_http_httpv_main_conf_t *mcf;
     ngx_http_httpv_loc_conf_t *lcf;
@@ -565,6 +637,16 @@ static ngx_int_t ngx_http_httpv_shadow_handler(ngx_http_request_t *r) {
     for (index = 0; index < mcf->policy.rule_count; index++) {
         if (ngx_http_httpv_rule_matches(&mcf->policy.rules[index], r)) {
             (void) ngx_atomic_fetch_add(&mcf->policy_block_matches, 1);
+            if (mcf->policy_enforce) {
+                ngx_str_t block_action = ngx_string("block");
+                ngx_str_t no_action = ngx_null_string;
+                ngx_http_httpv_emit_policy_event(mcf, r, 1, 0, no_action);
+                ngx_http_httpv_emit_policy_event(mcf, r, 5, NGX_HTTP_FORBIDDEN, block_action);
+                ngx_http_httpv_emit_policy_event(mcf, r, 6, NGX_HTTP_FORBIDDEN, no_action);
+                ngx_http_httpv_emit_policy_event(mcf, r, 7, NGX_HTTP_FORBIDDEN, no_action);
+                (void) ngx_atomic_fetch_add(&mcf->policy_enforced, 1);
+                return NGX_HTTP_FORBIDDEN;
+            }
             break;
         }
     }
@@ -623,12 +705,14 @@ static ngx_int_t ngx_http_httpv_metrics_handler(ngx_http_request_t *r) {
                     "httpv_native_ring_dropped %uA\n"
                     "httpv_native_policy_loaded %ui\n"
                     "httpv_native_policy_matches %uA\n"
-                    "httpv_native_policy_block_matches %uA\n",
+                    "httpv_native_policy_block_matches %uA\n"
+                    "httpv_native_policy_enforced %uA\n",
                     (ngx_atomic_uint_t) mcf->ring_enqueued,
                     (ngx_atomic_uint_t) mcf->ring_dropped,
                     mcf->policy.loaded,
                     (ngx_atomic_uint_t) mcf->policy_matches,
-                    (ngx_atomic_uint_t) mcf->policy_block_matches);
+                    (ngx_atomic_uint_t) mcf->policy_block_matches,
+                    (ngx_atomic_uint_t) mcf->policy_enforced);
     buffer->last = p;
     buffer->last_buf = 1;
     r->headers_out.status = NGX_HTTP_OK;

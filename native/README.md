@@ -18,9 +18,14 @@ location handler, including ring enqueue and ring-full drops. See [the native-mo
 
 The Go control service also publishes a compact `HTVC` policy snapshot into the
 shared runtime directory. Each C worker reloads it on a 250ms timer and records
-native scope and simple block-rule matches. The current implementation is
-**shadow-only**: Lua remains the authority that actually permits, gates, or
-blocks traffic. This lets HTTPV verify C/Lua match parity before enabling the
-native fast path for normal, gate-free requests.
+native scope and simple block-rule matches. This shadow step verifies C/Lua
+match parity before C handles traffic.
+
+The local prototype now enables C enforcement for the snapshot's simple
+`block` rules: up to 32 method/path/client-IP rules, with no manual gate. A
+native hit returns `403` before Lua runs and emits a complete ring-backed
+lifecycle. All other requests continue into Lua. Policy snapshots are refreshed
+within 250ms, so this is an eventually consistent acceleration layer; Lua
+remains the compatibility authority during transitions.
 
 The module is only loadable when its Nginx compatibility signature matches the host runtime. HTTPV must publish artifacts by OpenResty/Nginx version, operating system, architecture, libc, and build signature.
