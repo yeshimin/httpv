@@ -13,6 +13,11 @@ go run . -duration 10s -concurrency 64 -rate 1000 -json
 
 The load generator drains each HTTP response body before closing it so client connection reuse is part of the measurement.
 
+> Historical note: these measurements were taken before the load generator's
+> 1ms ticker was corrected. They remain useful for comparing the old transport
+> experiments to each other, but are not absolute 1,000-RPS capacity claims.
+> See [the corrected scheduler baseline](local-2026-10-02-rate-scheduler-correction.md).
+
 ## Results
 
 | Mode | RPS | p50 | p95 | p99 | Event loss |

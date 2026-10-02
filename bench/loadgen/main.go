@@ -99,13 +99,24 @@ func main() {
 				jobs <- struct{}{}
 			}
 		} else {
-			interval := time.Second / time.Duration(*rate)
-			ticker := time.NewTicker(interval)
-			defer ticker.Stop()
+			started := time.Now()
+			sent := 0
 			for time.Now().Before(deadline) {
-				<-ticker.C
-				if time.Now().Before(deadline) {
+				elapsed := time.Since(started)
+				due := int(float64(elapsed) * float64(*rate) / float64(time.Second))
+				if due <= sent {
+					next := time.Duration(float64(sent+1) * float64(time.Second) / float64(*rate))
+					if wait := next - elapsed; wait > 0 {
+						time.Sleep(wait)
+					}
+					continue
+				}
+				// Timers can wake late under load. Catch up in bounded bursts so a
+				// 1ms ticker cannot silently turn a 1,000-RPS test into ~600 RPS.
+				batch := min(due-sent, 32)
+				for range batch {
 					jobs <- struct{}{}
+					sent++
 				}
 			}
 		}

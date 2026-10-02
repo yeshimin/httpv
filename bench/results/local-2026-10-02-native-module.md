@@ -24,6 +24,10 @@ go run . -duration 10s -concurrency 64 -rate 1000 -json
 The load generator drains every response body before closing it, so connection
 reuse is included in the measurement.
 
+> Historical note: this report predates the correction to the load generator's
+> 1ms ticker. Do not treat its RPS values as absolute capacity numbers; see
+> [the corrected scheduler baseline](local-2026-10-02-rate-scheduler-correction.md).
+
 ## Results
 
 | Target rate | Actual RPS | p50 | p95 | p99 | HTTP errors | Native source events | Agent drops |
