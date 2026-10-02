@@ -692,7 +692,12 @@ func serveUDP(ctx context.Context, store *Store, hub *Hub) {
 }
 
 func main() {
-	store := newStore()
+	statePath := os.Getenv("HTTPV_CONTROL_STATE_PATH")
+	store, err := loadStore(statePath)
+	if err != nil {
+		log.Printf("control state unavailable; using defaults: %v", err)
+		store = newStore()
+	}
 	hub := newHub()
 	adminURL := strings.TrimRight(os.Getenv("HTTPV_OPENRESTY_ADMIN_URL"), "/")
 	if adminURL == "" {
@@ -704,6 +709,7 @@ func main() {
 	}
 	openresty := &OpenRestyClient{baseURL: adminURL, client: &http.Client{Timeout: 2 * time.Second}}
 	nativePolicy := newNativePolicyPublisher(os.Getenv("HTTPV_NATIVE_POLICY_PATH"))
+	persistStore := func() error { return store.persist(statePath) }
 	syncGatewayConfig := func() error {
 		config := store.config()
 		if _, err := nativePolicy.publish(config); err != nil {
@@ -781,6 +787,10 @@ func main() {
 			return
 		}
 		subject = store.updateSubject(subject)
+		if err := persistStore(); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "unable to persist configuration"})
+			return
+		}
 		if err := syncGatewayConfig(); err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "OpenResty has not accepted the configuration"})
 			return
@@ -798,6 +808,10 @@ func main() {
 			return
 		}
 		rule = store.addRule(rule)
+		if err := persistStore(); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "unable to persist rule"})
+			return
+		}
 		if err := syncGatewayConfig(); err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "OpenResty has not accepted the rule"})
 			return
@@ -807,6 +821,10 @@ func main() {
 	r.Delete("/api/rules/{id}", func(w http.ResponseWriter, r *http.Request) {
 		if !store.removeRule(chi.URLParam(r, "id")) {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "rule not found"})
+			return
+		}
+		if err := persistStore(); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "unable to persist configuration"})
 			return
 		}
 		if err := syncGatewayConfig(); err != nil {

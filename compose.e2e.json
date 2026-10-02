@@ -6,7 +6,8 @@
       "environment": {
         "HTTPV_OPENRESTY_ADMIN_URL": "http://openresty:8091",
         "HTTPV_GATEWAY_URL": "http://openresty:8088",
-        "HTTPV_NATIVE_POLICY_PATH": "/run/httpv/policy.bin"
+        "HTTPV_NATIVE_POLICY_PATH": "/run/httpv/policy.bin",
+        "HTTPV_CONTROL_STATE_PATH": "/run/httpv/control-state.json"
       },
       "ports": ["18090:8090"],
       "volumes": ["httpv_runtime:/run/httpv"],

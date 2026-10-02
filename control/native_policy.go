@@ -24,6 +24,7 @@ const (
 // Lua compatibility path.
 type NativePolicyPublisher struct {
 	path        string
+	versionPath string
 	mu          sync.Mutex
 	version     uint64
 	fingerprint string
@@ -41,7 +42,17 @@ type NativePolicyStatus struct {
 }
 
 func newNativePolicyPublisher(path string) *NativePolicyPublisher {
-	return &NativePolicyPublisher{path: path}
+	publisher := &NativePolicyPublisher{path: path}
+	if path == "" {
+		return publisher
+	}
+	publisher.versionPath = path + ".version"
+	if data, err := os.ReadFile(publisher.versionPath); err == nil {
+		if version, parseErr := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64); parseErr == nil {
+			publisher.version = version
+		}
+	}
+	return publisher
 }
 
 func appendNativePolicyText(buffer []byte, value string) ([]byte, error) {
@@ -127,6 +138,14 @@ func (p *NativePolicyPublisher) publish(config GatewayConfig) (uint64, error) {
 	}
 	if err := os.Rename(temporary, p.path); err != nil {
 		_ = os.Remove(temporary)
+		return 0, err
+	}
+	versionFile := fmt.Sprintf("%s.%d.tmp", p.versionPath, os.Getpid())
+	if err := os.WriteFile(versionFile, []byte(strconv.FormatUint(nextVersion, 10)+"\n"), 0o640); err != nil {
+		return 0, err
+	}
+	if err := os.Rename(versionFile, p.versionPath); err != nil {
+		_ = os.Remove(versionFile)
 		return 0, err
 	}
 	p.version = nextVersion

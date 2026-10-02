@@ -28,6 +28,14 @@ can create a future block rule directly from a displayed aggregate path. This
 prevents a slow browser from adding backpressure to the request path while
 preserving per-request analysis during normal traffic.
 
+## Local control-state recovery
+
+The local Compose stack atomically persists the managed subject, manual-gate
+settings, and dynamic block rules in its dedicated HTTPV runtime volume. A
+Control restart restores these policy settings before it synchronizes OpenResty
+again. Traffic events, request metadata, headers, and bodies are never written
+to this state file.
+
 ## What this prototype demonstrates
 
 - A configurable managed-traffic subject (all paths by default).

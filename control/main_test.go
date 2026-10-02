@@ -193,11 +193,41 @@ func TestNativePolicyVersionAndAckStatus(t *testing.T) {
 	if err != nil || second != 2 {
 		t.Fatalf("changed publish = %d, %v", second, err)
 	}
-	if err := os.WriteFile(path+".ack.42", []byte("2\n"), 0o644); err != nil {
+	restarted := newNativePolicyPublisher(path)
+	third, err := restarted.publish(config)
+	if err != nil || third != 3 {
+		t.Fatalf("restart publish = %d, %v", third, err)
+	}
+	if err := os.WriteFile(path+".ack.42", []byte("3\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	status := publisher.status()
-	if status.State != "active" || len(status.Acks) != 1 || status.Acks[0].Worker != "42" || status.Acks[0].Version != 2 {
+	status := restarted.status()
+	if status.State != "active" || status.Version != 3 || len(status.Acks) != 1 || status.Acks[0].Worker != "42" || status.Acks[0].Version != 3 {
 		t.Fatalf("unexpected policy status: %#v", status)
+	}
+}
+
+func TestControlStateSurvivesRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "control-state.json")
+	store := newStore()
+	store.updateSubject(Subject{
+		ID: "demo-api", Name: "Persistent API", Enabled: true, Display: true,
+		Match: Match{PathPrefix: "/persistent"},
+		Gate:  Gate{Enabled: true, TimeoutMS: 4_000, TimeoutAction: "allow"},
+	})
+	rule := store.addRule(Rule{PathPrefix: "/blocked", Method: "POST"})
+	if err := store.persist(path); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := loadStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := restored.config()
+	if len(config.Subjects) != 1 || config.Subjects[0].Name != "Persistent API" || !config.Subjects[0].Gate.Enabled || config.Subjects[0].Gate.TimeoutAction != "allow" {
+		t.Fatalf("subject was not restored: %#v", config.Subjects)
+	}
+	if len(config.Rules) != 1 || config.Rules[0].ID != rule.ID || config.Rules[0].PathPrefix != "/blocked" {
+		t.Fatalf("rules were not restored: %#v", config.Rules)
 	}
 }
