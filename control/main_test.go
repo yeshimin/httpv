@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"testing"
+	"time"
 )
 
 func frameText(value string) []byte {
@@ -52,5 +54,81 @@ func TestRecentEventsUsesFixedRing(t *testing.T) {
 	}
 	if recent[0].RequestID != string(rune(maxRecentEvents)) || recent[2].RequestID != string(rune(maxRecentEvents+2)) {
 		t.Fatalf("ring order is wrong: %#v", recent)
+	}
+}
+
+func TestRecentEventsIsEmptyBeforeTrafficArrives(t *testing.T) {
+	recent := newStore().recentEvents(500)
+	if len(recent) != 0 {
+		t.Fatalf("got %d events, want none", len(recent))
+	}
+}
+
+func TestTrafficSummaryKeepsTopPathsAndControlSignals(t *testing.T) {
+	accumulator := &trafficSummaryAccumulator{paths: map[string]*TrafficPathSummary{}}
+	accumulator.add(TrafficEvent{Phase: "request_started", TimestampMS: 100, SubjectID: "demo", Method: "GET", Path: "/hot"})
+	accumulator.add(TrafficEvent{Phase: "request_pending", TimestampMS: 120, SubjectID: "demo", Method: "GET", Path: "/hot"})
+	accumulator.add(TrafficEvent{Phase: "request_blocked", TimestampMS: 140, SubjectID: "demo", Method: "GET", Path: "/hot"})
+	accumulator.add(TrafficEvent{Phase: "response_finished", TimestampMS: 160, SubjectID: "demo", Method: "GET", Path: "/cold"})
+
+	summary := accumulator.take(600)
+	if summary == nil || summary.Total != 4 || summary.Started != 1 || summary.Finished != 1 || summary.Pending != 1 || summary.Blocked != 1 {
+		t.Fatalf("unexpected summary: %#v", summary)
+	}
+	if len(summary.Paths) != 2 || summary.Paths[0].Path != "/hot" || summary.Paths[0].Count != 3 || summary.Paths[0].Pending != 1 || summary.Paths[0].Blocked != 1 {
+		t.Fatalf("unexpected path aggregation: %#v", summary.Paths)
+	}
+}
+
+func TestDetailBudgetPreservesVisibleAndPriorityRequests(t *testing.T) {
+	now := time.Now()
+	c := &client{visible: map[string]time.Time{}}
+	first := TrafficEvent{Phase: "request_started", RequestID: "first"}
+	if !c.shouldShowDetail(first, now) || !c.shouldShowDetail(TrafficEvent{Phase: "response_finished", RequestID: "first"}, now) {
+		t.Fatal("visible request lifecycle should remain detailed")
+	}
+	for i := 0; i < visualDetailStartsPerSec-1; i++ {
+		if !c.shouldShowDetail(TrafficEvent{Phase: "request_started", RequestID: string(rune(i + 1_000))}, now) {
+			t.Fatal("detail budget ended too early")
+		}
+	}
+	if c.shouldShowDetail(TrafficEvent{Phase: "request_started", RequestID: "summarized"}, now) {
+		t.Fatal("ordinary request should become summarized after the detail budget")
+	}
+	if !c.shouldShowDetail(TrafficEvent{Phase: "request_pending", RequestID: "priority"}, now) {
+		t.Fatal("manual-gate request must remain detailed under overload")
+	}
+}
+
+func TestHubSendsOverloadSummaryAfterDetailBudget(t *testing.T) {
+	hub := newHub()
+	c := &client{
+		priority: make(chan []byte, 4),
+		detail:   make(chan []byte, visualDetailStartsPerSec+1),
+		visible:  map[string]time.Time{},
+	}
+	hub.clients[c] = struct{}{}
+	for i := 0; i < visualDetailStartsPerSec+1; i++ {
+		hub.broadcast(TrafficEvent{
+			Phase:       "request_started",
+			RequestID:   string(rune(i + 2_000)),
+			SubjectID:   "demo",
+			Method:      "GET",
+			Path:        "/overflow",
+			TimestampMS: int64(1_000 + i),
+		})
+	}
+	hub.flushSummaries(time.Now())
+	select {
+	case message := <-c.priority:
+		var summary TrafficSummary
+		if err := json.Unmarshal(message, &summary); err != nil {
+			t.Fatalf("decode summary: %v", err)
+		}
+		if summary.Type != "traffic_summary" || summary.Total != 1 || len(summary.Paths) != 1 || summary.Paths[0].Path != "/overflow" {
+			t.Fatalf("unexpected overload summary: %#v", summary)
+		}
+	default:
+		t.Fatal("expected an overload summary")
 	}
 }

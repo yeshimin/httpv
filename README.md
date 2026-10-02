@@ -14,6 +14,20 @@ The repository now includes a Rust edge agent between OpenResty and the control 
 
 Read [the architecture](docs/architecture.md) and [the performance contract](docs/performance-contract.md) before making data-path changes.
 
+## Adaptive visualization
+
+HTTPV treats policy enforcement and browser rendering as separate concerns. A
+managed request is still evaluated by OpenResty even when the browser is under
+load. Each connected console receives up to 360 ordinary request starts per
+second as detailed, clickable request lifecycles. Above that budget, ordinary
+traffic is summarized into 500ms windows by method and path. Waiting-for-manual
+decision and blocked traffic remain individual, actionable records.
+
+The console displays the aggregated rate and its busiest paths, and an operator
+can create a future block rule directly from a displayed aggregate path. This
+prevents a slow browser from adding backpressure to the request path while
+preserving per-request analysis during normal traffic.
+
 ## What this prototype demonstrates
 
 - A configurable managed-traffic subject (all paths by default).

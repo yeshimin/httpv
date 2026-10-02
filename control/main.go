@@ -20,7 +20,12 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const maxRecentEvents = 2_000
+const (
+	maxRecentEvents          = 2_000
+	visualDetailStartsPerSec = 360
+	visualSummaryInterval    = 500 * time.Millisecond
+	visualRecordTTL          = time.Minute
+)
 
 type Match struct {
 	Host       string `json:"host"`
@@ -70,6 +75,108 @@ type TrafficEvent struct {
 	Status        int    `json:"status,omitempty"`
 	DurationMS    int64  `json:"duration_ms,omitempty"`
 	Action        string `json:"action,omitempty"`
+}
+
+// TrafficSummary is a visualization-only overload signal. It never replaces
+// OpenResty's per-request policy evaluation or the control plane's counters.
+type TrafficSummary struct {
+	Type          string               `json:"type"`
+	WindowStartMS int64                `json:"window_start_ms"`
+	WindowEndMS   int64                `json:"window_end_ms"`
+	Total         uint64               `json:"total"`
+	Started       uint64               `json:"started"`
+	Responded     uint64               `json:"responded"`
+	Finished      uint64               `json:"finished"`
+	Pending       uint64               `json:"pending"`
+	Blocked       uint64               `json:"blocked"`
+	Paths         []TrafficPathSummary `json:"paths"`
+}
+
+type TrafficPathSummary struct {
+	SubjectID string `json:"subject_id"`
+	Method    string `json:"method"`
+	Path      string `json:"path"`
+	Count     uint64 `json:"count"`
+	Blocked   uint64 `json:"blocked"`
+	Pending   uint64 `json:"pending"`
+}
+
+type trafficSummaryAccumulator struct {
+	windowStartMS int64
+	total         uint64
+	started       uint64
+	responded     uint64
+	finished      uint64
+	pending       uint64
+	blocked       uint64
+	paths         map[string]*TrafficPathSummary
+}
+
+func (a *trafficSummaryAccumulator) add(event TrafficEvent) {
+	if a.windowStartMS == 0 {
+		a.windowStartMS = event.TimestampMS
+	}
+	a.total++
+	switch event.Phase {
+	case "request_started":
+		a.started++
+	case "response_started":
+		a.responded++
+	case "response_finished":
+		a.finished++
+	case "request_pending":
+		a.pending++
+	case "request_blocked":
+		a.blocked++
+	}
+	key := event.SubjectID + "\x00" + event.Method + "\x00" + event.Path
+	path := a.paths[key]
+	if path == nil {
+		if len(a.paths) >= 32 {
+			key = "\x00\x00other"
+			path = a.paths[key]
+		}
+		if path == nil {
+			path = &TrafficPathSummary{SubjectID: event.SubjectID, Method: event.Method, Path: event.Path}
+			if key == "\x00\x00other" {
+				path = &TrafficPathSummary{Path: "other"}
+			}
+			a.paths[key] = path
+		}
+	}
+	path.Count++
+	if event.Phase == "request_blocked" {
+		path.Blocked++
+	}
+	if event.Phase == "request_pending" {
+		path.Pending++
+	}
+}
+
+func (a *trafficSummaryAccumulator) take(windowEndMS int64) *TrafficSummary {
+	if a == nil || a.total == 0 {
+		return nil
+	}
+	paths := make([]TrafficPathSummary, 0, len(a.paths))
+	for _, path := range a.paths {
+		paths = append(paths, *path)
+	}
+	sort.Slice(paths, func(i, j int) bool { return paths[i].Count > paths[j].Count })
+	if len(paths) > 6 {
+		paths = paths[:6]
+	}
+	return &TrafficSummary{
+		Type:          "traffic_summary",
+		WindowStartMS: a.windowStartMS,
+		WindowEndMS:   windowEndMS,
+		Total:         a.total,
+		Started:       a.started,
+		Responded:     a.responded,
+		Finished:      a.finished,
+		Pending:       a.pending,
+		Blocked:       a.blocked,
+		Paths:         paths,
+	}
 }
 
 type Store struct {
@@ -156,6 +263,9 @@ func (s *Store) addEvent(event TrafficEvent) {
 func (s *Store) recentEvents(limit int) []TrafficEvent {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if len(s.events) == 0 {
+		return []TrafficEvent{}
+	}
 	if limit <= 0 || limit > len(s.events) {
 		limit = len(s.events)
 	}
@@ -168,8 +278,14 @@ func (s *Store) recentEvents(limit int) []TrafficEvent {
 }
 
 type client struct {
-	conn *websocket.Conn
-	send chan []byte
+	conn         *websocket.Conn
+	priority     chan []byte
+	detail       chan []byte
+	done         chan struct{}
+	detailWindow time.Time
+	detailStarts int
+	visible      map[string]time.Time
+	summary      *trafficSummaryAccumulator
 }
 
 type Hub struct {
@@ -179,22 +295,112 @@ type Hub struct {
 
 func newHub() *Hub { return &Hub{clients: map[*client]struct{}{}} }
 
+func terminalEvent(event TrafficEvent) bool {
+	return event.Phase == "response_finished" || event.Phase == "request_blocked"
+}
+
+func priorityEvent(event TrafficEvent) bool {
+	return event.Phase == "request_pending" || event.Phase == "request_decided" || event.Phase == "request_timeout" || event.Phase == "request_blocked"
+}
+
+func (c *client) aggregate(event TrafficEvent) {
+	if c.summary == nil {
+		c.summary = &trafficSummaryAccumulator{paths: map[string]*TrafficPathSummary{}}
+	}
+	c.summary.add(event)
+}
+
+func (c *client) shouldShowDetail(event TrafficEvent, now time.Time) bool {
+	if _, ok := c.visible[event.RequestID]; ok {
+		if terminalEvent(event) {
+			delete(c.visible, event.RequestID)
+		}
+		return true
+	}
+	if priorityEvent(event) {
+		c.visible[event.RequestID] = now
+		return true
+	}
+	if event.Phase != "request_started" {
+		return false
+	}
+	if c.detailWindow.IsZero() || now.Sub(c.detailWindow) >= time.Second {
+		c.detailWindow = now
+		c.detailStarts = 0
+	}
+	if c.detailStarts >= visualDetailStartsPerSec {
+		return false
+	}
+	c.detailStarts++
+	c.visible[event.RequestID] = now
+	return true
+}
+
 func (h *Hub) broadcast(event TrafficEvent) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if len(h.clients) == 0 {
 		return
 	}
-	payload, err := json.Marshal(event)
-	if err != nil {
-		return
-	}
+	now := time.Now()
+	var payload []byte
 	for c := range h.clients {
+		if !c.shouldShowDetail(event, now) {
+			c.aggregate(event)
+			continue
+		}
+		if payload == nil {
+			var err error
+			payload, err = json.Marshal(event)
+			if err != nil {
+				return
+			}
+		}
+		queue := c.detail
+		if priorityEvent(event) {
+			queue = c.priority
+		}
 		select {
-		case c.send <- payload:
+		case queue <- payload:
 		default:
-			// Visualization is deliberately lossy under overload. It must never
-			// apply backpressure to the enforcement or telemetry ingestion path.
+			c.aggregate(event)
+		}
+	}
+}
+
+func (h *Hub) flushSummaries(now time.Time) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for c := range h.clients {
+		for id, started := range c.visible {
+			if now.Sub(started) > visualRecordTTL {
+				delete(c.visible, id)
+			}
+		}
+		summary := c.summary.take(now.UnixMilli())
+		if summary == nil {
+			continue
+		}
+		payload, err := json.Marshal(summary)
+		if err == nil {
+			select {
+			case c.priority <- payload:
+			default:
+			}
+		}
+		c.summary = nil
+	}
+}
+
+func (h *Hub) run(ctx context.Context) {
+	ticker := time.NewTicker(visualSummaryInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			h.flushSummaries(now)
 		}
 	}
 }
@@ -205,13 +411,32 @@ func (h *Hub) serveWS(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	c := &client{conn: conn, send: make(chan []byte, 128)}
+	c := &client{
+		conn:     conn,
+		priority: make(chan []byte, 256),
+		detail:   make(chan []byte, 512),
+		done:     make(chan struct{}),
+		visible:  map[string]time.Time{},
+	}
 	h.mu.Lock()
 	h.clients[c] = struct{}{}
 	h.mu.Unlock()
 	go func() {
 		defer conn.Close()
-		for message := range c.send {
+		for {
+			var message []byte
+			select {
+			case <-c.done:
+				return
+			case message = <-c.priority:
+			default:
+				select {
+				case <-c.done:
+					return
+				case message = <-c.priority:
+				case message = <-c.detail:
+				}
+			}
 			if err := conn.WriteMessage(websocket.TextMessage, message); err != nil {
 				return
 			}
@@ -225,7 +450,7 @@ func (h *Hub) serveWS(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	if _, ok := h.clients[c]; ok {
 		delete(h.clients, c)
-		close(c.send)
+		close(c.done)
 	}
 	h.mu.Unlock()
 }
@@ -482,6 +707,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go serveUDP(ctx, store, hub)
+	go hub.run(ctx)
 	go func() {
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()

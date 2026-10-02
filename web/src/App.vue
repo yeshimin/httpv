@@ -10,6 +10,11 @@ type EventMessage = {
   phase: string; request_id: string; subject_id: string; timestamp_ms: number; method?: string; path?: string; client_ip?: string;
   status?: number; duration_ms?: number; response_bytes?: number; action?: string
 }
+type TrafficSummaryPath = { subject_id: string; method: string; path: string; count: number; blocked: number; pending: number }
+type TrafficSummary = {
+  type: 'traffic_summary'; window_start_ms: number; window_end_ms: number; total: number; started: number; responded: number;
+  finished: number; pending: number; blocked: number; paths: TrafficSummaryPath[]
+}
 
 type Locale = 'zh' | 'en'
 const messages: Record<Locale, Record<string, string>> = {
@@ -31,7 +36,8 @@ const messages: Record<Locale, Record<string, string>> = {
     pendingRemaining: '待人工决定，剩余 {seconds} 秒', pendingInfinite: '待人工决定，等待人工操作', batchRemaining: '待决倒计时：最早 {min} 秒，最晚 {max} 秒', decisionExpired: '该请求已不再等待人工决定。',
     allowedForwarding: '已放行——正在转发上游并等待响应。', dragSelect: '在画布空白处拖拽可框选多个请求', selectedCount: '已选 {count} 条请求',
     selectedPending: '其中 {count} 条仍待人工决定', batchHistory: '这些请求已经结束；只能为后续同类流量创建规则。', allowSelected: '放行选中待决请求', blockSelected: '阻断选中待决请求', blockSelectedFuture: '阻断选中路径的后续流量',
-    burst: '并发 20 条', emergencyBlock: '紧急阻断全部待决', rendering: '绘制 {shown}/{total}'
+    burst: '并发 20 条', emergencyBlock: '紧急阻断全部待决', rendering: '绘制 {shown}/{total}',
+    overloadMode: '高流量聚合', overloadSummary: '已聚合 {total} 个普通事件 · {rate}/秒', overloadHint: '待决和阻断请求仍逐条展示、可直接操作。', blockFlow: '阻断此流量'
   },
   en: {
     commandSurface: 'Traffic command surface', connecting: 'connecting', live: 'live', closed: 'closed',
@@ -51,7 +57,8 @@ const messages: Record<Locale, Record<string, string>> = {
     pendingRemaining: 'Waiting for a decision — {seconds}s remaining', pendingInfinite: 'Waiting for a manual decision', batchRemaining: 'Pending countdown: {min}s earliest, {max}s latest', decisionExpired: 'This request is no longer waiting for a decision.',
     allowedForwarding: 'Allowed — forwarding to the upstream and awaiting its response.', dragSelect: 'Drag across empty canvas space to box-select requests', selectedCount: '{count} requests selected',
     selectedPending: '{count} still waiting for a decision', batchHistory: 'These requests have completed; only future-match rules can be created.', allowSelected: 'Allow selected pending', blockSelected: 'Block selected pending', blockSelectedFuture: 'Block future traffic for selected paths',
-    burst: 'Burst ×20', emergencyBlock: 'Emergency block all waiting', rendering: 'rendering {shown}/{total}'
+    burst: 'Burst ×20', emergencyBlock: 'Emergency block all waiting', rendering: 'rendering {shown}/{total}',
+    overloadMode: 'High-traffic aggregation', overloadSummary: '{total} ordinary events aggregated · {rate}/s', overloadHint: 'Waiting and blocked requests remain individually visible and actionable.', blockFlow: 'Block this flow'
   }
 }
 
@@ -71,6 +78,7 @@ const connectionState = ref<'connecting' | 'live' | 'closed'>('connecting')
 const locale = ref<Locale>(localStorage.getItem('httpv-locale') === 'en' ? 'en' : 'zh')
 const nowMs = ref(Date.now())
 const burstBusy = ref(false)
+const overloadSummary = ref<TrafficSummary>()
 let socket: WebSocket | undefined
 let clockTimer: number | undefined
 let eventFrame: number | undefined
@@ -131,6 +139,7 @@ const selectedPendingLabel = computed(() => {
   return t('pendingRemaining', { seconds })
 })
 const latestRecord = computed(() => records.value.at(-1))
+const overloadActive = computed(() => Boolean(overloadSummary.value && nowMs.value - overloadSummary.value.window_end_ms < 1_500))
 const flowStatus = computed(() => {
   const record = latestRecord.value
   if (!record) return t('ready')
@@ -183,6 +192,15 @@ function enqueueEvent(event: EventMessage) {
   if (eventFrame === undefined) eventFrame = window.requestAnimationFrame(flushEvents)
 }
 
+function applySummary(summary: TrafficSummary) {
+  overloadSummary.value = summary
+}
+
+function summaryRate(summary: TrafficSummary) {
+  const duration = Math.max(1, summary.window_end_ms - summary.window_start_ms)
+  return Math.round(summary.total * 1_000 / duration)
+}
+
 async function bootstrap() {
   const response = await fetch('/api/bootstrap')
   if (!response.ok) throw new Error('Unable to load control state')
@@ -199,7 +217,11 @@ function connect() {
   const protocol = location.protocol === 'https:' ? 'wss' : 'ws'
   socket = new WebSocket(`${protocol}://${location.host}/api/ws`)
   socket.onopen = () => { connectionState.value = 'live' }
-  socket.onmessage = (message) => enqueueEvent(JSON.parse(message.data) as EventMessage)
+  socket.onmessage = (message) => {
+    const payload = JSON.parse(message.data) as EventMessage | TrafficSummary
+    if ('type' in payload && payload.type === 'traffic_summary') applySummary(payload)
+    else enqueueEvent(payload as EventMessage)
+  }
   socket.onclose = () => {
     connectionState.value = 'closed'
     window.setTimeout(connect, 1000)
@@ -280,6 +302,16 @@ async function blockPath() {
   rules.value.push(await response.json())
 }
 
+async function blockAggregatePath(path: TrafficSummaryPath) {
+  if (!path.path || path.path === 'other') return
+  const response = await fetch('/api/rules', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'block', path_prefix: path.path, method: path.method, client_ip: '' })
+  })
+  if (!response.ok) { alert('Unable to create the block rule.'); return }
+  rules.value.push(await response.json())
+}
+
 async function removeRule(id: string) {
   const response = await fetch(`/api/rules/${id}`, { method: 'DELETE' })
   if (response.ok) rules.value = rules.value.filter((rule) => rule.id !== id)
@@ -350,6 +382,10 @@ onBeforeUnmount(() => {
             <button class="outline compact" :disabled="burstBusy" @click="sendBurst">{{ t('burst') }}</button>
             <button class="test-button" @click="runGuidedDemo">{{ t('guidedDemo') }}</button>
           </div>
+        </div>
+        <div v-if="overloadActive && overloadSummary" class="overload-strip">
+          <div class="overload-copy"><b>{{ t('overloadMode') }}</b><span>{{ t('overloadSummary', { total: overloadSummary.total, rate: summaryRate(overloadSummary) }) }}</span><small>{{ t('overloadHint') }}</small></div>
+          <div class="overload-paths"><button v-for="path in overloadSummary.paths" :key="`${path.subject_id}:${path.method}:${path.path}`" :disabled="!path.path || path.path === 'other'" @click="blockAggregatePath(path)"><span>{{ path.method || '*' }} {{ path.path || '*' }}</span><b>{{ path.count }}</b><em>{{ t('blockFlow') }}</em></button></div>
         </div>
         <TrafficCanvas :records="records" :animated-ids="animatedIds" :render-delay-ms="renderDelayMs" :trail-ms="trailMs" :selected-ids="selectedIds" @select="selectOne" @select-many="selectMany" />
         <div class="legend"><span class="legend-blue"></span>{{ t('request') }} <span class="legend-green"></span>{{ t('response') }} <span class="legend-yellow"></span>{{ t('waiting') }} <span class="legend-red"></span>{{ t('blocked') }} · {{ t('tapParticle') }} · {{ t('dragSelect') }}</div>
