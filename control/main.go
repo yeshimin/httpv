@@ -296,7 +296,7 @@ type Hub struct {
 func newHub() *Hub { return &Hub{clients: map[*client]struct{}{}} }
 
 func terminalEvent(event TrafficEvent) bool {
-	return event.Phase == "response_finished" || event.Phase == "request_blocked"
+	return event.Phase == "response_finished"
 }
 
 func priorityEvent(event TrafficEvent) bool {

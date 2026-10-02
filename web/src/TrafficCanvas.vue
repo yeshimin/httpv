@@ -11,6 +11,7 @@ export type TrafficRecord = {
   startedAt: number
   pendingAt?: number
   releasedAt?: number
+  blockedAt?: number
   responseStartedAt?: number
   finishedAt?: number
   status?: number
@@ -78,14 +79,14 @@ function interpolate(from: Point, to: Point, progress: number) {
 function staticPosition(record: TrafficRecord) {
   if (!app) return { x: 0, y: 0 }
   const points = requestPoints(record.requestId, app.renderer.width, app.renderer.height)
-  if (record.pendingAt && !record.releasedAt && !record.finishedAt) return points.gateway
+  if (record.pendingAt && !record.releasedAt && !record.blockedAt && !record.finishedAt) return points.gateway
   if (record.action === 'block' || record.responseStartedAt) return points.gateway
   if (record.finishedAt) return points.client
   return points.upstream
 }
 
 function staticKey(record: TrafficRecord, selected: boolean) {
-  return `${record.pendingAt}:${record.releasedAt}:${record.responseStartedAt}:${record.finishedAt}:${record.action}:${record.status}:${selected}`
+  return `${record.pendingAt}:${record.releasedAt}:${record.blockedAt}:${record.responseStartedAt}:${record.finishedAt}:${record.action}:${record.status}:${selected}`
 }
 
 function updateStaticParticle(entry: StaticParticle, selected: boolean) {
@@ -311,11 +312,13 @@ function render() {
     }
     particle.dot.visible = true
     const ingressEnd = start + ingressDuration
-    const waitingAtGate = Boolean(record.pendingAt && !record.releasedAt && !record.responseStartedAt)
+    const waitingAtGate = Boolean(record.pendingAt && !record.releasedAt && !record.blockedAt && !record.responseStartedAt)
     const forwardStart = Math.max(ingressEnd, (record.releasedAt ?? start) + props.renderDelayMs)
     const forwardEnd = forwardStart + forwardDuration
     const blockedAtGateway = record.action === 'block'
-    const actualResponseStart = record.responseStartedAt === undefined ? undefined : record.responseStartedAt + props.renderDelayMs
+    const actualResponseStart = record.responseStartedAt === undefined
+      ? (record.blockedAt === undefined ? undefined : record.blockedAt + props.renderDelayMs)
+      : record.responseStartedAt + props.renderDelayMs
     const responseOrigin = blockedAtGateway ? points.gateway : points.upstream
     const visualResponseStart = actualResponseStart === undefined ? undefined : Math.max(actualResponseStart, blockedAtGateway ? ingressEnd : forwardEnd)
     const responseEnd = visualResponseStart === undefined ? undefined : visualResponseStart + responseDuration

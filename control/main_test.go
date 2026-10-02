@@ -133,6 +133,15 @@ func TestHubSendsOverloadSummaryAfterDetailBudget(t *testing.T) {
 	}
 }
 
+func TestOnlyResponseFinishedEndsBrowserLifecycle(t *testing.T) {
+	if terminalEvent(TrafficEvent{Phase: "request_blocked"}) {
+		t.Fatal("block event must retain the lifecycle for response events")
+	}
+	if !terminalEvent(TrafficEvent{Phase: "response_finished"}) {
+		t.Fatal("response finish must close the browser lifecycle")
+	}
+}
+
 func TestEncodeNativePolicy(t *testing.T) {
 	policy, err := encodeNativePolicy(GatewayConfig{
 		Subjects: []Subject{{

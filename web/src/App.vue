@@ -100,9 +100,9 @@ function onLocaleChange(event: Event) {
 const records = computed(() => Array.from(traffic.value.values()).sort((a, b) => a.startedAt - b.startedAt))
 const selected = computed(() => selectedID.value ? traffic.value.get(selectedID.value) : undefined)
 const selectedRecords = computed(() => selectedIds.value.map((id) => traffic.value.get(id)).filter((record): record is TrafficRecord => Boolean(record)))
-const pendingCount = computed(() => records.value.filter((record) => record.pendingAt && !record.releasedAt && !record.finishedAt).length)
+const pendingCount = computed(() => records.value.filter(isPendingActive).length)
 function isPendingActive(record: TrafficRecord) {
-  if (!record.pendingAt || record.releasedAt || record.finishedAt) return false
+  if (!record.pendingAt || record.releasedAt || record.blockedAt || record.finishedAt) return false
   const timeout = subject.value.gate.timeout_ms
   return timeout === 0 || nowMs.value < record.pendingAt + timeout
 }
@@ -123,7 +123,7 @@ const animatedIds = computed(() => {
   const selectedSet = new Set(selectedIds.value)
   const prioritized = [
     ...records.value.filter((record) => selectedSet.has(record.requestId)),
-    ...records.value.filter((record) => record.pendingAt && !record.releasedAt && !record.finishedAt),
+    ...records.value.filter((record) => record.pendingAt && !record.releasedAt && !record.blockedAt && !record.finishedAt),
     ...records.value.slice(-360).reverse()
   ]
   const unique = new Set<string>()
@@ -132,7 +132,7 @@ const animatedIds = computed(() => {
 })
 const selectedPendingLabel = computed(() => {
   const record = selected.value
-  if (!record?.pendingAt || record.releasedAt || record.finishedAt) return ''
+  if (!record?.pendingAt || record.releasedAt || record.blockedAt || record.finishedAt) return ''
   const timeout = subject.value.gate.timeout_ms
   if (timeout === 0) return t('pendingInfinite')
   const seconds = Math.max(0, Math.ceil((record.pendingAt + timeout - nowMs.value) / 1000))
@@ -143,7 +143,7 @@ const overloadActive = computed(() => Boolean(overloadSummary.value && nowMs.val
 const flowStatus = computed(() => {
   const record = latestRecord.value
   if (!record) return t('ready')
-  if (record.pendingAt && !record.releasedAt && !record.finishedAt) return t('waitingDecision')
+  if (record.pendingAt && !record.releasedAt && !record.blockedAt && !record.finishedAt) return t('waitingDecision')
   if (record.releasedAt && !record.responseStartedAt) return t('allowedForwarding')
   if (!record.responseStartedAt) return t('flowing', { method: record.method, path: record.path })
   if (!record.finishedAt) return t('returning')
@@ -177,6 +177,9 @@ function applyEventToMap(event: EventMessage, target: Map<string, TrafficRecord>
     if (event.status) record.status = event.status
   }
   if (event.phase === 'request_decided' && event.action === 'allow') record.releasedAt = event.timestamp_ms
+  if ((event.phase === 'request_decided' || event.phase === 'request_blocked' || event.phase === 'request_timeout') && event.action === 'block') {
+    record.blockedAt = event.timestamp_ms
+  }
   target.set(record.requestId, { ...record })
   if (target.size > 5_000) target.delete(target.keys().next().value as string)
 }
@@ -212,7 +215,7 @@ async function bootstrap() {
   for (const event of data.events as EventMessage[]) applyEventToMap(event, next)
   const cutoff = Date.now() - 15_000
   for (const [id, record] of next) {
-    const keepPending = Boolean(record.pendingAt && !record.releasedAt && !record.finishedAt)
+    const keepPending = Boolean(record.pendingAt && !record.releasedAt && !record.blockedAt && !record.finishedAt)
     if (!keepPending && record.startedAt < cutoff) next.delete(id)
   }
   traffic.value = next
@@ -429,7 +432,7 @@ onBeforeUnmount(() => {
             <div><dt>{{ t('responseSize') }}</dt><dd>{{ selected.responseBytes === undefined ? t('inFlight') : `${selected.responseBytes} bytes` }}</dd></div>
           </dl>
           <div class="actions">
-            <p v-if="selected.pendingAt && !selected.releasedAt && !selected.finishedAt" class="pending-countdown" :class="{ expired: !selectedPendingActive }">{{ selectedPendingActive ? selectedPendingLabel : t('decisionExpired') }}</p>
+            <p v-if="selected.pendingAt && !selected.releasedAt && !selected.blockedAt && !selected.finishedAt" class="pending-countdown" :class="{ expired: !selectedPendingActive }">{{ selectedPendingActive ? selectedPendingLabel : t('decisionExpired') }}</p>
             <button :disabled="!selectedPendingActive" class="allow" @click="decide('allow')">{{ t('allowPending') }}</button>
             <button :disabled="!selectedPendingActive" class="block" @click="decide('block')">{{ t('blockPending') }}</button>
             <button class="outline" @click="blockPath">{{ t('blockFuture') }}</button>
