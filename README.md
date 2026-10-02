@@ -1,4 +1,4 @@
-# HTTPV V1
+# HTTPV
 
 HTTPV is a local prototype for real-time, per-request HTTP traffic visualization and control.
 
