@@ -189,9 +189,6 @@ function _M.response_finished()
     return
   end
   metrics.increment("responses_total")
-  if ngx.var.httpv_native_response_telemetry == "1" then
-    return
-  end
   emit(ctx, "response_finished", {
     status = tonumber(ngx.var.status) or ngx.status,
     response_bytes = tonumber(ngx.var.body_bytes_sent) or 0,

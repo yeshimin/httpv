@@ -846,6 +846,13 @@ static ngx_int_t ngx_http_httpv_log_handler(ngx_http_request_t *r) {
         }
         return NGX_OK;
     }
+    // Once policy is loaded, Lua legacy traffic emits its complete lifecycle
+    // through one queue so request/response ordering is preserved. Before the
+    // first policy load, retain the original C completion fallback.
+    mcf = ngx_http_get_module_main_conf(r, ngx_http_httpv_module);
+    if (mcf != NULL && mcf->policy.loaded) {
+        return NGX_OK;
+    }
     variable = ngx_http_get_variable(r, &ngx_http_httpv_enabled_variable,
                                     ngx_hash_key(ngx_http_httpv_enabled_variable.data,
                                                  ngx_http_httpv_enabled_variable.len));
