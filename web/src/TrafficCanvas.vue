@@ -264,10 +264,10 @@ function drawLane() {
   const clientX = width * 0.1
   const gatewayX = width * 0.48
   const upstreamX = width * 0.86
-  lane.rect(gatewayX - 44, top, 88, bottom - top).fill({ color: 0x75a7ff, alpha: 0.035 })
-  lane.rect(gatewayX - 44, top, 88, bottom - top).stroke({ color: 0x426482, width: 1, alpha: 0.45 })
-  lane.moveTo(clientX, top).lineTo(clientX, bottom).stroke({ color: 0x32506c, width: 1, alpha: 0.35 })
-  lane.moveTo(upstreamX, top).lineTo(upstreamX, bottom).stroke({ color: 0x32506c, width: 1, alpha: 0.35 })
+  lane.rect(gatewayX - 48, top, 96, bottom - top).fill({ color: 0x75a7ff, alpha: 0.075 })
+  lane.rect(gatewayX - 48, top, 96, bottom - top).stroke({ color: 0x5f87a8, width: 1.5, alpha: 0.8 })
+  lane.moveTo(clientX, top).lineTo(clientX, bottom).stroke({ color: 0x5f87a8, width: 1.5, alpha: 0.72 })
+  lane.moveTo(upstreamX, top).lineTo(upstreamX, bottom).stroke({ color: 0x5f87a8, width: 1.5, alpha: 0.72 })
   app.stage.addChildAt(lane, 0)
 }
 
@@ -427,8 +427,8 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .traffic-canvas { position: relative; width: 100%; height: 100%; min-height: 330px; overflow: hidden; }
-.traffic-canvas :deep(canvas) { position: absolute; inset: 0; width: 100%; height: 100%; }
-.lane-label { position: absolute; top: 12px; transform: translateX(-50%); color: #8da4b7; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; pointer-events: none; }
+.traffic-canvas :deep(canvas) { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 0; }
+.lane-label { position: absolute; z-index: 1; top: 12px; transform: translateX(-50%); color: #b9d2e4; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; pointer-events: none; }
 .label-client { left: 10%; }
 .label-gateway { left: 48%; }
 .label-upstream { left: 86%; }

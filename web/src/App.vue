@@ -163,6 +163,7 @@ function applyEventToMap(event: EventMessage, target: Map<string, TrafficRecord>
   record.method = event.method ?? record.method
   record.path = event.path ?? record.path
   record.clientIp = event.client_ip ?? record.clientIp
+  if (event.phase === 'request_started') record.startedAt = event.timestamp_ms
   if (event.phase === 'request_pending') record.pendingAt = event.timestamp_ms
   if (event.phase === 'response_started') record.responseStartedAt = event.timestamp_ms
   if (event.phase === 'response_finished') {
@@ -209,6 +210,11 @@ async function bootstrap() {
   rules.value = data.config.rules
   const next = new Map<string, TrafficRecord>()
   for (const event of data.events as EventMessage[]) applyEventToMap(event, next)
+  const cutoff = Date.now() - 15_000
+  for (const [id, record] of next) {
+    const keepPending = Boolean(record.pendingAt && !record.releasedAt && !record.finishedAt)
+    if (!keepPending && record.startedAt < cutoff) next.delete(id)
+  }
   traffic.value = next
 }
 
@@ -372,7 +378,7 @@ onBeforeUnmount(() => {
     </header>
 
     <div class="command-layout">
-      <section class="canvas-panel">
+      <section class="canvas-panel" :class="{ 'has-overload': overloadActive && overloadSummary }">
         <div class="canvas-header">
           <div><strong>{{ subject.name }}</strong><span>{{ t('tracked', { count: records.length, pending: pendingCount }) }} · {{ t('rendering', { shown: animatedIds.length, total: records.length }) }}</span></div>
           <div class="header-actions">
