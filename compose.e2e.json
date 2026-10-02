@@ -1,0 +1,56 @@
+{
+  "name": "httpv-e2e",
+  "services": {
+    "control": {
+      "build": "./control",
+      "environment": {
+        "HTTPV_OPENRESTY_ADMIN_URL": "http://openresty:8091",
+        "HTTPV_GATEWAY_URL": "http://openresty:8088",
+        "HTTPV_NATIVE_POLICY_PATH": "/run/httpv/policy.bin"
+      },
+      "ports": ["18090:8090"],
+      "volumes": ["httpv_runtime:/run/httpv"],
+      "networks": ["internal"]
+    },
+    "openresty": {
+      "build": {"context": ".", "dockerfile": "openresty/Dockerfile"},
+      "ports": ["18088:8088", "127.0.0.1:18091:8091"],
+      "volumes": ["httpv_runtime:/run/httpv"],
+      "depends_on": ["control", "demo", "edge-agent"],
+      "networks": ["internal"]
+    },
+    "demo": {
+      "build": "./demo",
+      "networks": ["internal"]
+    },
+    "edge-agent": {
+      "build": "./edge-agent",
+      "environment": {
+        "HTTPV_AGENT_SOCKET_PATH": "/run/httpv/edge-agent.sock",
+        "HTTPV_AGENT_NATIVE_SOCKET_PATH": "/run/httpv/native.sock",
+        "HTTPV_AGENT_RING_DIRECTORY": "/run/httpv",
+        "HTTPV_AGENT_NATIVE_SOCKET_BUFFER_BYTES": "8388608",
+        "HTTPV_AGENT_CONTROL_ADDR": "control:9100",
+        "HTTPV_AGENT_METRICS_ADDR": "0.0.0.0:9102",
+        "HTTPV_AGENT_QUEUE_CAPACITY": "65536",
+        "HTTPV_AGENT_FORWARD_WORKERS": "4"
+      },
+      "volumes": ["httpv_runtime:/run/httpv"],
+      "depends_on": ["control"],
+      "ports": ["127.0.0.1:19102:9102"],
+      "networks": ["internal"]
+    },
+    "web": {
+      "build": "./web",
+      "ports": ["15173:5173"],
+      "depends_on": ["control"],
+      "networks": ["internal"]
+    }
+  },
+  "networks": {
+    "internal": {"driver": "bridge"}
+  },
+  "volumes": {
+    "httpv_runtime": {}
+  }
+}
