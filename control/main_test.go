@@ -132,3 +132,35 @@ func TestHubSendsOverloadSummaryAfterDetailBudget(t *testing.T) {
 		t.Fatal("expected an overload summary")
 	}
 }
+
+func TestEncodeNativePolicy(t *testing.T) {
+	policy, err := encodeNativePolicy(GatewayConfig{
+		Subjects: []Subject{{
+			ID: "subject-a", Enabled: true, Display: true,
+			Match: Match{Host: "api.local", PathPrefix: "/v1", Method: "GET"},
+			Gate:  Gate{Enabled: false},
+		}},
+		Rules: []Rule{{Action: "block", Method: "POST", PathPrefix: "/admin", ClientIP: "10.0.0.8"}},
+	})
+	if err != nil {
+		t.Fatalf("encode native policy: %v", err)
+	}
+	if string(policy[:4]) != "HTVC" || policy[4] != nativePolicyVersion || policy[5] != 1 || policy[6] != 1 || policy[7] != 0 || binary.BigEndian.Uint16(policy[8:10]) != 1 {
+		t.Fatalf("unexpected policy header: %v", policy[:10])
+	}
+	offset := 10
+	read := func() string {
+		length := int(binary.BigEndian.Uint16(policy[offset : offset+2]))
+		offset += 2
+		value := string(policy[offset : offset+length])
+		offset += length
+		return value
+	}
+	values := []string{read(), read(), read(), read(), read(), read(), read()}
+	want := []string{"subject-a", "api.local", "/v1", "GET", "POST", "/admin", "10.0.0.8"}
+	for i := range want {
+		if values[i] != want[i] {
+			t.Fatalf("field %d = %q, want %q", i, values[i], want[i])
+		}
+	}
+}

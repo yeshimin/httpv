@@ -5,9 +5,11 @@
       "build": "./control",
       "environment": {
         "HTTPV_OPENRESTY_ADMIN_URL": "http://openresty:8091",
-        "HTTPV_GATEWAY_URL": "http://openresty:8088"
+        "HTTPV_GATEWAY_URL": "http://openresty:8088",
+        "HTTPV_NATIVE_POLICY_PATH": "/run/httpv/policy.bin"
       },
       "ports": ["8090:8090"],
+      "volumes": ["httpv_runtime:/run/httpv"],
       "networks": ["internal"]
     },
     "openresty": {

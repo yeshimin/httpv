@@ -15,6 +15,14 @@
 #define NGX_HTTP_HTTPV_RING_RECORD_SIZE 2048
 #define NGX_HTTP_HTTPV_RING_CAPACITY 4096
 #define NGX_HTTP_HTTPV_RING_PATH_SIZE 1024
+#define NGX_HTTP_HTTPV_POLICY_PATH_SIZE 1024
+#define NGX_HTTP_HTTPV_POLICY_BUFFER_SIZE (64 * 1024)
+#define NGX_HTTP_HTTPV_POLICY_MAX_RULES 32
+#define NGX_HTTP_HTTPV_POLICY_SUBJECT_ID_SIZE 128
+#define NGX_HTTP_HTTPV_POLICY_HOST_SIZE 256
+#define NGX_HTTP_HTTPV_POLICY_PATH_PREFIX_SIZE 512
+#define NGX_HTTP_HTTPV_POLICY_METHOD_SIZE 32
+#define NGX_HTTP_HTTPV_POLICY_CLIENT_IP_SIZE 64
 
 typedef struct {
     u_char      magic[4];
@@ -25,6 +33,32 @@ typedef struct {
     uint64_t    read_seq;
     u_char      reserved[32];
 } ngx_http_httpv_ring_header_t;
+
+typedef struct {
+    u_char      method[NGX_HTTP_HTTPV_POLICY_METHOD_SIZE];
+    u_char      path_prefix[NGX_HTTP_HTTPV_POLICY_PATH_PREFIX_SIZE];
+    u_char      client_ip[NGX_HTTP_HTTPV_POLICY_CLIENT_IP_SIZE];
+    ngx_str_t   method_value;
+    ngx_str_t   path_prefix_value;
+    ngx_str_t   client_ip_value;
+} ngx_http_httpv_native_rule_t;
+
+typedef struct {
+    ngx_flag_t  loaded;
+    ngx_flag_t  enabled;
+    ngx_flag_t  display;
+    ngx_flag_t  gate_enabled;
+    u_char      subject_id[NGX_HTTP_HTTPV_POLICY_SUBJECT_ID_SIZE];
+    u_char      host[NGX_HTTP_HTTPV_POLICY_HOST_SIZE];
+    u_char      path_prefix[NGX_HTTP_HTTPV_POLICY_PATH_PREFIX_SIZE];
+    u_char      method[NGX_HTTP_HTTPV_POLICY_METHOD_SIZE];
+    ngx_str_t   subject_id_value;
+    ngx_str_t   host_value;
+    ngx_str_t   path_prefix_value;
+    ngx_str_t   method_value;
+    ngx_uint_t  rule_count;
+    ngx_http_httpv_native_rule_t rules[NGX_HTTP_HTTPV_POLICY_MAX_RULES];
+} ngx_http_httpv_native_policy_t;
 
 typedef struct {
     ngx_str_t       socket_path;
@@ -40,6 +74,11 @@ typedef struct {
     ngx_http_httpv_ring_header_t *ring;
     ngx_atomic_t    ring_enqueued;
     ngx_atomic_t    ring_dropped;
+    ngx_str_t       policy_path;
+    ngx_event_t     policy_event;
+    ngx_http_httpv_native_policy_t policy;
+    ngx_atomic_t    policy_matches;
+    ngx_atomic_t    policy_block_matches;
 } ngx_http_httpv_main_conf_t;
 
 typedef struct {
@@ -52,14 +91,20 @@ static void *ngx_http_httpv_create_loc_conf(ngx_conf_t *cf);
 static char *ngx_http_httpv_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child);
 static char *ngx_http_httpv_set_socket(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 static char *ngx_http_httpv_set_ring(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
+static char *ngx_http_httpv_set_policy(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 static char *ngx_http_httpv_metrics(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 static ngx_int_t ngx_http_httpv_init_process(ngx_cycle_t *cycle);
 static void ngx_http_httpv_exit_process(ngx_cycle_t *cycle);
 static ngx_int_t ngx_http_httpv_log_handler(ngx_http_request_t *r);
 static ngx_int_t ngx_http_httpv_metrics_handler(ngx_http_request_t *r);
+static ngx_int_t ngx_http_httpv_shadow_handler(ngx_http_request_t *r);
 static ngx_int_t ngx_http_httpv_init_ring(ngx_cycle_t *cycle, ngx_http_httpv_main_conf_t *mcf);
 static void ngx_http_httpv_close_ring(ngx_http_httpv_main_conf_t *mcf);
 static ngx_int_t ngx_http_httpv_ring_write(ngx_http_httpv_main_conf_t *mcf, u_char *frame, size_t frame_len);
+static void ngx_http_httpv_policy_timer(ngx_event_t *event);
+static ngx_int_t ngx_http_httpv_reload_policy(ngx_http_httpv_main_conf_t *mcf, ngx_log_t *log);
+static ngx_flag_t ngx_http_httpv_policy_matches(ngx_http_httpv_native_policy_t *policy, ngx_http_request_t *r);
+static ngx_flag_t ngx_http_httpv_rule_matches(ngx_http_httpv_native_rule_t *rule, ngx_http_request_t *r);
 
 static ngx_str_t ngx_http_httpv_request_id_variable = ngx_string("httpv_request_id");
 static ngx_str_t ngx_http_httpv_subject_id_variable = ngx_string("httpv_subject_id");
@@ -78,6 +123,14 @@ static ngx_command_t ngx_http_httpv_commands[] = {
         ngx_string("httpv_native_ring"),
         NGX_HTTP_MAIN_CONF|NGX_CONF_TAKE1,
         ngx_http_httpv_set_ring,
+        NGX_HTTP_MAIN_CONF_OFFSET,
+        0,
+        NULL
+    },
+    {
+        ngx_string("httpv_native_policy"),
+        NGX_HTTP_MAIN_CONF|NGX_CONF_TAKE1,
+        ngx_http_httpv_set_policy,
         NGX_HTTP_MAIN_CONF_OFFSET,
         0,
         NULL
@@ -158,6 +211,11 @@ static ngx_int_t ngx_http_httpv_postconfiguration(ngx_conf_t *cf) {
     ngx_http_handler_pt *h;
 
     cmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_core_module);
+    h = ngx_array_push(&cmcf->phases[NGX_HTTP_REWRITE_PHASE].handlers);
+    if (h == NULL) {
+        return NGX_ERROR;
+    }
+    *h = ngx_http_httpv_shadow_handler;
     h = ngx_array_push(&cmcf->phases[NGX_HTTP_LOG_PHASE].handlers);
     if (h == NULL) {
         return NGX_ERROR;
@@ -220,6 +278,19 @@ static char *ngx_http_httpv_set_ring(ngx_conf_t *cf, ngx_command_t *cmd, void *c
     return NGX_CONF_OK;
 }
 
+static char *ngx_http_httpv_set_policy(ngx_conf_t *cf, ngx_command_t *cmd, void *conf) {
+    ngx_http_httpv_main_conf_t *mcf = conf;
+    ngx_str_t *value = cf->args->elts;
+    if (mcf->policy_path.data != NULL) {
+        return "is duplicate";
+    }
+    if (value[1].len == 0 || value[1].len >= NGX_HTTP_HTTPV_POLICY_PATH_SIZE) {
+        return "policy path is invalid or too long";
+    }
+    mcf->policy_path = value[1];
+    return NGX_CONF_OK;
+}
+
 static char *ngx_http_httpv_metrics(ngx_conf_t *cf, ngx_command_t *cmd, void *conf) {
     ngx_http_core_loc_conf_t *clcf;
 
@@ -263,6 +334,14 @@ static ngx_int_t ngx_http_httpv_init_process(ngx_cycle_t *cycle) {
         ngx_log_error(NGX_LOG_WARN, cycle->log, 0,
                       "httpv native ring unavailable; falling back to Unix datagram telemetry");
     }
+    if (ngx_process == NGX_PROCESS_WORKER && mcf->policy_path.len > 0) {
+        ngx_memzero(&mcf->policy_event, sizeof(ngx_event_t));
+        mcf->policy_event.handler = ngx_http_httpv_policy_timer;
+        mcf->policy_event.data = mcf;
+        mcf->policy_event.log = cycle->log;
+        (void) ngx_http_httpv_reload_policy(mcf, cycle->log);
+        ngx_add_timer(&mcf->policy_event, 250);
+    }
     return NGX_OK;
 }
 
@@ -275,6 +354,9 @@ static void ngx_http_httpv_exit_process(ngx_cycle_t *cycle) {
     }
     mcf = http_ctx->main_conf[ngx_http_httpv_module.ctx_index];
     if (mcf) {
+        if (mcf->policy_event.timer_set) {
+            ngx_del_timer(&mcf->policy_event);
+        }
         ngx_http_httpv_close_ring(mcf);
         if (mcf->fd != NGX_HTTP_HTTPV_INVALID_SOCKET) {
             ngx_close_socket(mcf->fd);
@@ -344,6 +426,151 @@ static void ngx_http_httpv_close_ring(ngx_http_httpv_main_conf_t *mcf) {
     }
 }
 
+static ngx_int_t ngx_http_httpv_policy_read_text(u_char **cursor, u_char *end,
+                                                 u_char *storage, size_t storage_size, ngx_str_t *value) {
+    uint16_t length;
+
+    if (*cursor + 2 > end) {
+        return NGX_ERROR;
+    }
+    length = (uint16_t) (((uint16_t) (*cursor)[0] << 8) | (*cursor)[1]);
+    *cursor += 2;
+    if (*cursor + length > end || length >= storage_size) {
+        return NGX_ERROR;
+    }
+    ngx_memcpy(storage, *cursor, length);
+    value->data = storage;
+    value->len = length;
+    *cursor += length;
+    return NGX_OK;
+}
+
+static ngx_int_t ngx_http_httpv_reload_policy(ngx_http_httpv_main_conf_t *mcf, ngx_log_t *log) {
+    u_char path[NGX_HTTP_HTTPV_POLICY_PATH_SIZE];
+    u_char buffer[NGX_HTTP_HTTPV_POLICY_BUFFER_SIZE];
+    u_char *cursor;
+    u_char *end;
+    ssize_t bytes;
+    uint16_t rule_count;
+    ngx_uint_t index;
+    ngx_int_t fd;
+    ngx_http_httpv_native_policy_t next;
+
+    if (mcf->policy_path.len == 0 || mcf->policy_path.len >= sizeof(path)) {
+        return NGX_DECLINED;
+    }
+    ngx_memcpy(path, mcf->policy_path.data, mcf->policy_path.len);
+    path[mcf->policy_path.len] = '\0';
+    fd = open((const char *) path, O_RDONLY);
+    if (fd == NGX_HTTP_HTTPV_INVALID_SOCKET) {
+        return NGX_DECLINED;
+    }
+    bytes = read(fd, buffer, sizeof(buffer));
+    ngx_close_file(fd);
+    if (bytes < 10 || ngx_memcmp(buffer, "HTVC", 4) != 0 || buffer[4] != 1) {
+        return NGX_ERROR;
+    }
+    rule_count = (uint16_t) (((uint16_t) buffer[8] << 8) | buffer[9]);
+    if (rule_count > NGX_HTTP_HTTPV_POLICY_MAX_RULES) {
+        return NGX_ERROR;
+    }
+    ngx_memzero(&next, sizeof(ngx_http_httpv_native_policy_t));
+    next.enabled = buffer[5] == 1;
+    next.display = buffer[6] == 1;
+    next.gate_enabled = buffer[7] == 1;
+    next.rule_count = rule_count;
+    cursor = buffer + 10;
+    end = buffer + bytes;
+    if (ngx_http_httpv_policy_read_text(&cursor, end, next.subject_id, sizeof(next.subject_id), &next.subject_id_value) != NGX_OK
+        || ngx_http_httpv_policy_read_text(&cursor, end, next.host, sizeof(next.host), &next.host_value) != NGX_OK
+        || ngx_http_httpv_policy_read_text(&cursor, end, next.path_prefix, sizeof(next.path_prefix), &next.path_prefix_value) != NGX_OK
+        || ngx_http_httpv_policy_read_text(&cursor, end, next.method, sizeof(next.method), &next.method_value) != NGX_OK) {
+        return NGX_ERROR;
+    }
+    for (index = 0; index < rule_count; index++) {
+        ngx_http_httpv_native_rule_t *rule = &next.rules[index];
+        if (ngx_http_httpv_policy_read_text(&cursor, end, rule->method, sizeof(rule->method), &rule->method_value) != NGX_OK
+            || ngx_http_httpv_policy_read_text(&cursor, end, rule->path_prefix, sizeof(rule->path_prefix), &rule->path_prefix_value) != NGX_OK
+            || ngx_http_httpv_policy_read_text(&cursor, end, rule->client_ip, sizeof(rule->client_ip), &rule->client_ip_value) != NGX_OK) {
+            return NGX_ERROR;
+        }
+    }
+    if (cursor != end) {
+        return NGX_ERROR;
+    }
+    next.loaded = 1;
+    mcf->policy = next;
+    return NGX_OK;
+}
+
+static void ngx_http_httpv_policy_timer(ngx_event_t *event) {
+    ngx_http_httpv_main_conf_t *mcf = event->data;
+    (void) ngx_http_httpv_reload_policy(mcf, event->log);
+    ngx_add_timer(event, 250);
+}
+
+static ngx_flag_t ngx_http_httpv_equals(ngx_str_t left, ngx_str_t right) {
+    return left.len == right.len && (left.len == 0 || ngx_memcmp(left.data, right.data, left.len) == 0);
+}
+
+static ngx_flag_t ngx_http_httpv_has_prefix(ngx_str_t value, ngx_str_t prefix) {
+    return prefix.len == 0 || (value.len >= prefix.len && ngx_memcmp(value.data, prefix.data, prefix.len) == 0);
+}
+
+static ngx_flag_t ngx_http_httpv_policy_matches(ngx_http_httpv_native_policy_t *policy, ngx_http_request_t *r) {
+    ngx_str_t host = ngx_null_string;
+
+    if (!policy->loaded || !policy->enabled) {
+        return 0;
+    }
+    if (r->headers_in.host != NULL) {
+        host = r->headers_in.host->value;
+    }
+    if (policy->host_value.len > 0 && !ngx_http_httpv_equals(policy->host_value, host)) {
+        return 0;
+    }
+    if (policy->method_value.len > 0 && !ngx_http_httpv_equals(policy->method_value, r->method_name)) {
+        return 0;
+    }
+    return ngx_http_httpv_has_prefix(r->uri, policy->path_prefix_value);
+}
+
+static ngx_flag_t ngx_http_httpv_rule_matches(ngx_http_httpv_native_rule_t *rule, ngx_http_request_t *r) {
+    if (rule->method_value.len > 0 && !ngx_http_httpv_equals(rule->method_value, r->method_name)) {
+        return 0;
+    }
+    if (!ngx_http_httpv_has_prefix(r->uri, rule->path_prefix_value)) {
+        return 0;
+    }
+    if (rule->client_ip_value.len > 0 && !ngx_http_httpv_equals(rule->client_ip_value, r->connection->addr_text)) {
+        return 0;
+    }
+    return 1;
+}
+
+static ngx_int_t ngx_http_httpv_shadow_handler(ngx_http_request_t *r) {
+    ngx_http_httpv_main_conf_t *mcf;
+    ngx_http_httpv_loc_conf_t *lcf;
+    ngx_uint_t index;
+
+    lcf = ngx_http_get_module_loc_conf(r, ngx_http_httpv_module);
+    if (lcf == NULL || !lcf->enabled) {
+        return NGX_DECLINED;
+    }
+    mcf = ngx_http_get_module_main_conf(r, ngx_http_httpv_module);
+    if (mcf == NULL || !ngx_http_httpv_policy_matches(&mcf->policy, r) || mcf->policy.gate_enabled) {
+        return NGX_DECLINED;
+    }
+    (void) ngx_atomic_fetch_add(&mcf->policy_matches, 1);
+    for (index = 0; index < mcf->policy.rule_count; index++) {
+        if (ngx_http_httpv_rule_matches(&mcf->policy.rules[index], r)) {
+            (void) ngx_atomic_fetch_add(&mcf->policy_block_matches, 1);
+            break;
+        }
+    }
+    return NGX_DECLINED;
+}
+
 static ngx_int_t ngx_http_httpv_ring_write(ngx_http_httpv_main_conf_t *mcf, u_char *frame, size_t frame_len) {
     uint64_t write_seq;
     uint64_t read_seq;
@@ -382,7 +609,7 @@ static ngx_int_t ngx_http_httpv_metrics_handler(ngx_http_request_t *r) {
     if (mcf == NULL) {
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
-    buffer = ngx_create_temp_buf(r->pool, 512);
+    buffer = ngx_create_temp_buf(r->pool, 1024);
     if (buffer == NULL) {
         return NGX_HTTP_INTERNAL_SERVER_ERROR;
     }
@@ -393,9 +620,15 @@ static ngx_int_t ngx_http_httpv_metrics_handler(ngx_http_request_t *r) {
                     (ngx_atomic_uint_t) mcf->dropped);
     p = ngx_sprintf(p,
                     "httpv_native_ring_enqueued %uA\n"
-                    "httpv_native_ring_dropped %uA\n",
+                    "httpv_native_ring_dropped %uA\n"
+                    "httpv_native_policy_loaded %ui\n"
+                    "httpv_native_policy_matches %uA\n"
+                    "httpv_native_policy_block_matches %uA\n",
                     (ngx_atomic_uint_t) mcf->ring_enqueued,
-                    (ngx_atomic_uint_t) mcf->ring_dropped);
+                    (ngx_atomic_uint_t) mcf->ring_dropped,
+                    mcf->policy.loaded,
+                    (ngx_atomic_uint_t) mcf->policy_matches,
+                    (ngx_atomic_uint_t) mcf->policy_block_matches);
     buffer->last = p;
     buffer->last_buf = 1;
     r->headers_out.status = NGX_HTTP_OK;

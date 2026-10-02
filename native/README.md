@@ -14,4 +14,13 @@ event remains on the same visual trajectory as the request-start event.
 The source counters are exposed through the module's `httpv_native_metrics`
 location handler, including ring enqueue and ring-full drops. See [the native-module baseline](../bench/results/local-2026-10-02-native-module.md) for measured behavior and current limitations.
 
+## Native policy shadow mode
+
+The Go control service also publishes a compact `HTVC` policy snapshot into the
+shared runtime directory. Each C worker reloads it on a 250ms timer and records
+native scope and simple block-rule matches. The current implementation is
+**shadow-only**: Lua remains the authority that actually permits, gates, or
+blocks traffic. This lets HTTPV verify C/Lua match parity before enabling the
+native fast path for normal, gate-free requests.
+
 The module is only loadable when its Nginx compatibility signature matches the host runtime. HTTPV must publish artifacts by OpenResty/Nginx version, operating system, architecture, libc, and build signature.

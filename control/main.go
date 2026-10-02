@@ -703,6 +703,14 @@ func main() {
 		gatewayURL = "http://127.0.0.1:8088"
 	}
 	openresty := &OpenRestyClient{baseURL: adminURL, client: &http.Client{Timeout: 2 * time.Second}}
+	nativePolicy := newNativePolicyPublisher(os.Getenv("HTTPV_NATIVE_POLICY_PATH"))
+	syncGatewayConfig := func() error {
+		config := store.config()
+		if err := nativePolicy.publish(config); err != nil {
+			return fmt.Errorf("publish native policy: %w", err)
+		}
+		return openresty.putConfig(config)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -712,7 +720,7 @@ func main() {
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 		for {
-			if err := openresty.putConfig(store.config()); err != nil {
+			if err := syncGatewayConfig(); err != nil {
 				log.Printf("OpenResty config sync pending: %v", err)
 			}
 			select {
@@ -770,7 +778,7 @@ func main() {
 			return
 		}
 		subject = store.updateSubject(subject)
-		if err := openresty.putConfig(store.config()); err != nil {
+		if err := syncGatewayConfig(); err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "OpenResty has not accepted the configuration"})
 			return
 		}
@@ -787,7 +795,7 @@ func main() {
 			return
 		}
 		rule = store.addRule(rule)
-		if err := openresty.putConfig(store.config()); err != nil {
+		if err := syncGatewayConfig(); err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "OpenResty has not accepted the rule"})
 			return
 		}
@@ -798,7 +806,7 @@ func main() {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "rule not found"})
 			return
 		}
-		if err := openresty.putConfig(store.config()); err != nil {
+		if err := syncGatewayConfig(); err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "OpenResty has not accepted the configuration"})
 			return
 		}
