@@ -12,7 +12,7 @@
     },
     "openresty": {
       "build": "./openresty",
-      "ports": ["8088:8088"],
+      "ports": ["8088:8088", "127.0.0.1:8091:8091"],
       "depends_on": ["control", "demo", "edge-agent"],
       "networks": ["internal"]
     },
@@ -29,6 +29,7 @@
         "HTTPV_AGENT_QUEUE_CAPACITY": "65536"
       },
       "depends_on": ["control"],
+      "ports": ["127.0.0.1:9102:9102"],
       "networks": ["internal"]
     },
     "web": {

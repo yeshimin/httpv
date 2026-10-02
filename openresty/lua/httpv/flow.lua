@@ -1,4 +1,5 @@
 local config = require "httpv.config"
+local metrics = require "httpv.metrics"
 local publisher = require "httpv.publisher"
 
 local _M = {}
@@ -89,6 +90,7 @@ local function resolve_pending(ctx, subject)
   local decision_key = "decision:" .. ctx.request_id
   local gate_epoch = dict:get("gate_epoch") or 0
   dict:set(pending_key, "1")
+  metrics.pending_enter()
   emit(ctx, "request_pending")
 
   local started = ngx.now()
@@ -97,6 +99,7 @@ local function resolve_pending(ctx, subject)
     if (dict:get("gate_epoch") or 0) ~= gate_epoch then
       dict:delete(pending_key)
       dict:delete(decision_key)
+      metrics.pending_exit()
       emit(ctx, "request_decided", { action = "block" })
       return "block"
     end
@@ -104,11 +107,13 @@ local function resolve_pending(ctx, subject)
     if decision == "allow" or decision == "block" then
       dict:delete(decision_key)
       dict:delete(pending_key)
+      metrics.pending_exit()
       emit(ctx, "request_decided", { action = decision })
       return decision
     end
     if timeout_ms > 0 and (ngx.now() - started) * 1000 >= timeout_ms then
       dict:delete(pending_key)
+      metrics.pending_exit()
       local action = gate.timeout_action == "allow" and "allow" or "block"
       emit(ctx, "request_timeout", { action = action })
       return action
@@ -140,17 +145,20 @@ function _M.access()
     started_at_ms = now_ms()
   }
   ngx.ctx.httpv = ctx
+  metrics.increment("managed_requests_total")
   emit(ctx, "request_started")
 
   local gateway = config.get()
   for _, rule in ipairs(gateway.rules or {}) do
     if matches_rule(rule, method, path, client_ip) then
+      metrics.increment("blocked_requests_total")
       emit(ctx, "request_blocked", { action = "block", status = ngx.HTTP_FORBIDDEN })
       ngx.exit(ngx.HTTP_FORBIDDEN)
     end
   end
 
   if resolve_pending(ctx, subject) == "block" then
+    metrics.increment("blocked_requests_total")
     emit(ctx, "request_blocked", { action = "block", status = ngx.HTTP_FORBIDDEN })
     ngx.exit(ngx.HTTP_FORBIDDEN)
   end
@@ -169,6 +177,7 @@ function _M.response_finished()
   if not ctx then
     return
   end
+  metrics.increment("responses_total")
   emit(ctx, "response_finished", {
     status = tonumber(ngx.var.status) or ngx.status,
     response_bytes = tonumber(ngx.var.body_bytes_sent) or 0,
