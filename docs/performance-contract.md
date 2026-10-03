@@ -16,6 +16,10 @@ These are engineering targets, not claims of current benchmark results.
 | Static selectable visual layer | 10,000 request markers |
 | Operator command | One batch command, never one browser request per selected item |
 
+Manual-gate limits are configured per subject. A zero limit means unlimited;
+production configurations should use a finite limit and an explicit overflow
+action so waiting connections cannot exhaust an edge node.
+
 ## Non-negotiable invariants
 
 1. The OpenResty data plane keeps enforcing its last valid local rule snapshot if every external component is unavailable.

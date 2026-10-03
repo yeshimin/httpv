@@ -29,7 +29,7 @@ function _M.decide(request_id)
   if action ~= "allow" and action ~= "block" then
     return json(ngx.HTTP_BAD_REQUEST, { error = "invalid action" })
   end
-  local pending_key = "pending:" .. request_id
+  local pending_key = ngx.shared.httpv_pending:get("pending_index:" .. request_id) or ("pending:" .. request_id)
   if not ngx.shared.httpv_pending:get(pending_key) then
     return json(ngx.HTTP_NOT_FOUND, { error = "request is not pending" })
   end
@@ -49,7 +49,8 @@ function _M.decide_batch()
   local accepted = 0
   local pending = ngx.shared.httpv_pending
   for _, request_id in ipairs(request_ids) do
-    if type(request_id) == "string" and pending:get("pending:" .. request_id) then
+    local pending_key = type(request_id) == "string" and (pending:get("pending_index:" .. request_id) or ("pending:" .. request_id))
+    if pending_key and pending:get(pending_key) then
       pending:set("decision:" .. request_id, action, 120)
       accepted = accepted + 1
     end

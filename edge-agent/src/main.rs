@@ -43,7 +43,7 @@ fn setting(name: &str, fallback: &str) -> String {
 
 fn valid_phase(code: u8) -> bool {
     match code {
-        1..=8 => true,
+        1..=9 => true,
         _ => false,
     }
 }
@@ -60,8 +60,9 @@ mod tests {
     fn accepts_all_protocol_phases() {
         assert!(valid_phase(1));
         assert!(valid_phase(8));
+        assert!(valid_phase(9));
         assert!(!valid_phase(0));
-        assert!(!valid_phase(9));
+        assert!(!valid_phase(10));
     }
 }
 

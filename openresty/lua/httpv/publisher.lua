@@ -10,7 +10,8 @@ local phase_codes = {
   request_blocked = 5,
   response_started = 6,
   response_finished = 7,
-  request_aborted = 8
+  request_aborted = 8,
+  request_overflow = 9
 }
 
 local queue = {}

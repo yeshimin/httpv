@@ -34,7 +34,10 @@
       "gate": {
         "enabled": false,
         "timeout_ms": 30000,
-        "timeout_action": "block"
+        "timeout_action": "block",
+        "max_pending": 2000,
+        "overflow_action": "block",
+        "failure_action": "allow"
       }
     }
   ],

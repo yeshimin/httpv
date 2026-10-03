@@ -61,6 +61,7 @@ func loadStore(path string, configPaths ...string) (*Store, error) {
 			store.gateway.Rules = append(store.gateway.Rules, rule)
 		}
 	}
+	store.gateway = normalizeGatewayConfig(store.gateway)
 	return store, nil
 }
 

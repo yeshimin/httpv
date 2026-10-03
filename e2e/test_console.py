@@ -24,7 +24,7 @@ def api(method, path, payload=None):
         return response.status, response.read()
 
 
-def subject(gate_enabled=False, timeout_ms=30_000, timeout_action="block"):
+def subject(gate_enabled=False, timeout_ms=30_000, timeout_action="block", max_pending=2_000, overflow_action="block", failure_action="allow"):
     return {
         "id": "default",
         "name": "Default traffic",
@@ -35,6 +35,9 @@ def subject(gate_enabled=False, timeout_ms=30_000, timeout_action="block"):
             "enabled": gate_enabled,
             "timeout_ms": timeout_ms,
             "timeout_action": timeout_action,
+            "max_pending": max_pending,
+            "overflow_action": overflow_action,
+            "failure_action": failure_action,
         },
     }
 
@@ -145,6 +148,34 @@ class ConsoleE2E(unittest.TestCase):
         self.assertIsNotNone(request_id, "request did not enter the manual gate")
         api("POST", f"/api/pending/{request_id}", {"action": "block"})
         expect(self.page.locator(".flow-status")).to_contain_text(re.compile("已完成：403|Completed: 403"), timeout=5_000)
+
+    def test_pending_limit_rejects_overflow(self):
+        api("PUT", "/api/subjects/default", subject(True, 5_000, "block", 1, "reject"))
+
+        def gateway_request():
+            try:
+                with urlopen(f"{GATEWAY_URL}/", timeout=10) as response:
+                    return response.status
+            except HTTPError as error:
+                return error.code
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            first = executor.submit(gateway_request)
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                _, raw = api("GET", "/api/events")
+                if any(event.get("phase") == "request_pending" for event in json.loads(raw)):
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail("first request did not reserve the pending slot")
+
+            self.assertEqual(gateway_request(), 503)
+            api("POST", "/api/pending/block-all")
+            self.assertEqual(first.result(timeout=5), 403)
+
+        _, raw = api("GET", "/api/events")
+        self.assertTrue(any(event.get("phase") == "request_overflow" and event.get("action") == "reject" for event in json.loads(raw)))
 
     def test_high_traffic_shows_aggregation(self):
         def burst(_):

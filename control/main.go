@@ -34,9 +34,12 @@ type Match struct {
 }
 
 type Gate struct {
-	Enabled       bool   `json:"enabled"`
-	TimeoutMS     int64  `json:"timeout_ms"`
-	TimeoutAction string `json:"timeout_action"`
+	Enabled        bool   `json:"enabled"`
+	TimeoutMS      int64  `json:"timeout_ms"`
+	TimeoutAction  string `json:"timeout_action"`
+	MaxPending     int64  `json:"max_pending"`
+	OverflowAction string `json:"overflow_action"`
+	FailureAction  string `json:"failure_action"`
 }
 
 type Subject struct {
@@ -146,6 +149,10 @@ func (a *trafficSummaryAccumulator) add(event TrafficEvent) {
 		a.pending++
 	case "request_blocked":
 		a.blocked++
+	case "request_overflow":
+		if event.Action != "allow" {
+			a.blocked++
+		}
 	}
 	key := event.SubjectID + "\x00" + event.Method + "\x00" + event.Path
 	path := a.paths[key]
@@ -163,7 +170,7 @@ func (a *trafficSummaryAccumulator) add(event TrafficEvent) {
 		}
 	}
 	path.Count++
-	if event.Phase == "request_blocked" {
+	if event.Phase == "request_blocked" || (event.Phase == "request_overflow" && event.Action != "allow") {
 		path.Blocked++
 	}
 	if event.Phase == "request_pending" {
@@ -259,7 +266,7 @@ func terminalEvent(event TrafficEvent) bool {
 }
 
 func priorityEvent(event TrafficEvent) bool {
-	return event.Phase == "request_pending" || event.Phase == "request_decided" || event.Phase == "request_timeout" || event.Phase == "request_blocked" || event.Phase == "request_aborted"
+	return event.Phase == "request_pending" || event.Phase == "request_decided" || event.Phase == "request_timeout" || event.Phase == "request_blocked" || event.Phase == "request_aborted" || event.Phase == "request_overflow"
 }
 
 func (c *client) aggregate(event TrafficEvent) {
@@ -543,6 +550,8 @@ func phaseName(code byte) (string, bool) {
 		return "response_finished", true
 	case 8:
 		return "request_aborted", true
+	case 9:
+		return "request_overflow", true
 	default:
 		return "", false
 	}

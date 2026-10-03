@@ -157,6 +157,16 @@ func TestDecodeRequestAbortedPhase(t *testing.T) {
 	}
 }
 
+func TestDecodeRequestOverflowPhase(t *testing.T) {
+	phase, ok := phaseName(9)
+	if !ok || phase != "request_overflow" {
+		t.Fatalf("phase 9 = %q, %v; want request_overflow", phase, ok)
+	}
+	if !priorityEvent(TrafficEvent{Phase: phase}) {
+		t.Fatal("gate overflow must bypass visualization sampling")
+	}
+}
+
 func TestEncodeNativePolicy(t *testing.T) {
 	policy, err := encodeNativePolicy(GatewayConfig{
 		Subjects: []Subject{{
@@ -263,6 +273,20 @@ func TestGatewayConfigValidatesRouteReferences(t *testing.T) {
 	config.Routes = append(config.Routes, Route{ID: "api", Enabled: true, Match: Match{Host: "api.local", PathPrefix: "/v1"}, UpstreamID: "second"})
 	if err := validateGatewayConfig(normalizeGatewayConfig(config)); err != nil {
 		t.Fatalf("valid multi-route configuration rejected: %v", err)
+	}
+}
+
+func TestGatewayConfigValidatesGateProtection(t *testing.T) {
+	config := defaultGatewayConfig()
+	config.Subjects[0].Gate.MaxPending = -1
+	if err := validateGatewayConfig(normalizeGatewayConfig(config)); err == nil {
+		t.Fatal("expected a negative pending limit validation error")
+	}
+	config = defaultGatewayConfig()
+	config.Subjects[0].Gate.OverflowAction = "invalid"
+	normalized := normalizeGatewayConfig(config)
+	if normalized.Subjects[0].Gate.OverflowAction != "block" {
+		t.Fatalf("invalid overflow action was not normalized: %#v", normalized.Subjects[0].Gate)
 	}
 }
 

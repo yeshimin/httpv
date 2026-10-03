@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import TrafficCanvas, { type TrafficRecord } from './TrafficCanvas.vue'
 
 type Match = { host: string; path_prefix: string; method: string }
-type Gate = { enabled: boolean; timeout_ms: number; timeout_action: 'allow' | 'block' }
+type Gate = { enabled: boolean; timeout_ms: number; timeout_action: 'allow' | 'block'; max_pending: number; overflow_action: 'allow' | 'block' | 'reject'; failure_action: 'allow' | 'block' }
 type Subject = { id: string; name: string; enabled: boolean; display: boolean; match: Match; gate: Gate }
 type Upstream = { id: string; name: string; url: string; host_header: string }
 type Route = { id: string; name: string; enabled: boolean; match: Match; upstream_id: string }
@@ -30,7 +30,7 @@ const messages: Record<Locale, Record<string, string>> = {
     ready: '就绪——运行引导演示以生成一条可见请求。', waitingDecision: '正在等待你的决定——点击黄色粒子，然后选择放行或阻断。',
     flowing: '请求正在流向上游：{method} {path}', returning: '上游已响应——响应正在返回客户端。',
     completed: '已完成：{status}，耗时 {duration}ms。拖尾会短暂保留。', clientAborted: '客户端已断开，请求已经终止。', trafficControls: '流量控制',
-    managedPath: '受监管路径', gateTimeout: '闸门超时', timeoutAction: '超时动作', block: '阻断', allow: '放行',
+    managedPath: '受监管路径', gateTimeout: '闸门超时', timeoutAction: '超时动作', block: '阻断', allow: '放行', maxPending: '最大待决量', overflowAction: '超限动作', failureAction: '异常动作', reject503: '拒绝 503', failOpen: '放行（Fail-open）', failClosed: '阻断（Fail-closed）',
     regulateTraffic: '监管匹配流量', showEvents: '展示事件', render: '绘制 {value}ms', trail: '拖尾 {value}ms',
     selectedRequest: '选中请求', client: '客户端', status: '状态', duration: '耗时', responseSize: '响应大小',
     inFlight: '处理中', unavailable: '不可用', allowPending: '放行待决请求', blockPending: '阻断待决请求',
@@ -56,7 +56,7 @@ const messages: Record<Locale, Record<string, string>> = {
     ready: 'Ready — run the guided demo to create one visible request.', waitingDecision: 'Waiting for your decision — tap the yellow particle, then Allow or Block.',
     flowing: 'Request flowing to upstream: {method} {path}', returning: 'Upstream has responded — response is returning to the client.',
     completed: 'Completed: {status} in {duration}ms. Its trail remains visible briefly.', clientAborted: 'The client disconnected and the request has ended.', trafficControls: 'Traffic controls',
-    managedPath: 'Managed path', gateTimeout: 'Gate timeout', timeoutAction: 'On timeout', block: 'Block', allow: 'Allow',
+    managedPath: 'Managed path', gateTimeout: 'Gate timeout', timeoutAction: 'On timeout', block: 'Block', allow: 'Allow', maxPending: 'Max pending', overflowAction: 'On overflow', failureAction: 'On failure', reject503: 'Reject 503', failOpen: 'Allow (fail-open)', failClosed: 'Block (fail-closed)',
     regulateTraffic: 'Regulate matching traffic', showEvents: 'Show events', render: 'Render {value}ms', trail: 'Trail {value}ms',
     selectedRequest: 'Selected request', client: 'Client', status: 'Status', duration: 'Duration', responseSize: 'Response size',
     inFlight: 'in flight', unavailable: 'not available', allowPending: 'Allow pending', blockPending: 'Block pending',
@@ -78,7 +78,7 @@ const messages: Record<Locale, Record<string, string>> = {
 const subject = ref<Subject>({
   id: 'default', name: 'Default traffic', enabled: true, display: true,
   match: { host: '', path_prefix: '/', method: '' },
-  gate: { enabled: false, timeout_ms: 30000, timeout_action: 'block' }
+  gate: { enabled: false, timeout_ms: 30000, timeout_action: 'block', max_pending: 2000, overflow_action: 'block', failure_action: 'allow' }
 })
 const subjects = ref<Subject[]>([])
 const upstreams = ref<Upstream[]>([])
@@ -125,7 +125,7 @@ const records = computed(() => Array.from(traffic.value.values()).sort((a, b) =>
 const selected = computed(() => selectedID.value ? traffic.value.get(selectedID.value) : undefined)
 const selectedRecords = computed(() => selectedIds.value.map((id) => traffic.value.get(id)).filter((record): record is TrafficRecord => Boolean(record)))
 const pendingCount = computed(() => records.value.filter(isPendingActive).length)
-const activeFlowCount = computed(() => records.value.filter((record) => !record.finishedAt && !record.abortedAt && !(record.action === 'block' && record.blockedAt)).length)
+const activeFlowCount = computed(() => records.value.filter((record) => !record.finishedAt && !record.abortedAt && !record.blockedAt).length)
 const currentRps = computed(() => records.value.filter((record) => record.startedAt >= nowMs.value - 1_000).length)
 const p95Duration = computed(() => {
   const durations = records.value.map((record) => record.durationMs).filter((duration): duration is number => duration !== undefined).sort((a, b) => a - b)
@@ -211,11 +211,11 @@ function applyEventToMap(event: EventMessage, target: Map<string, TrafficRecord>
     record.durationMs = event.duration_ms
     record.responseBytes = event.response_bytes
   }
-  if (event.phase === 'request_blocked' || event.phase === 'request_timeout' || event.phase === 'request_decided') {
+  if (event.phase === 'request_blocked' || event.phase === 'request_timeout' || event.phase === 'request_decided' || event.phase === 'request_overflow') {
     record.action = event.action
     if (event.status) record.status = event.status
   }
-  if ((event.phase === 'request_decided' || event.phase === 'request_timeout') && event.action === 'allow') {
+  if ((event.phase === 'request_decided' || event.phase === 'request_timeout' || event.phase === 'request_overflow') && event.action === 'allow') {
     record.releasedAt = event.timestamp_ms
   }
   if (event.phase === 'request_aborted') {
@@ -224,7 +224,7 @@ function applyEventToMap(event: EventMessage, target: Map<string, TrafficRecord>
     record.status = event.status ?? 499
     record.durationMs = event.duration_ms
   }
-  if ((event.phase === 'request_decided' || event.phase === 'request_blocked' || event.phase === 'request_timeout') && event.action === 'block') {
+  if ((event.phase === 'request_decided' || event.phase === 'request_blocked' || event.phase === 'request_timeout' || event.phase === 'request_overflow') && (event.action === 'block' || event.action === 'reject')) {
     record.blockedAt = event.timestamp_ms
   }
   target.set(record.requestId, { ...record })
@@ -245,7 +245,7 @@ function enqueueEvent(event: EventMessage) {
 
 function recordVisualEnd(record: TrafficRecord) {
   const terminalAt = record.finishedAt
-    ?? (record.action === 'block' ? record.blockedAt : undefined)
+    ?? record.blockedAt
     ?? record.abortedAt
   if (terminalAt === undefined) return undefined
   return terminalAt + renderDelayMs.value + 420 + Math.max(1_000, trailMs.value)
@@ -522,6 +522,11 @@ onBeforeUnmount(() => {
             <label><span>{{ t('managedPath') }}</span><input v-model="subject.match.path_prefix" @change="saveSubject" /></label>
             <label><span>{{ t('gateTimeout') }}</span><input v-model.number="subject.gate.timeout_ms" min="0" step="1000" type="number" @change="saveSubject" /></label>
             <label><span>{{ t('timeoutAction') }}</span><select v-model="subject.gate.timeout_action" @change="saveSubject"><option value="block">{{ t('block') }}</option><option value="allow">{{ t('allow') }}</option></select></label>
+          </div>
+          <div class="field-row protection-row">
+            <label><span>{{ t('maxPending') }}</span><input v-model.number="subject.gate.max_pending" min="0" step="100" type="number" @change="saveSubject" /></label>
+            <label><span>{{ t('overflowAction') }}</span><select v-model="subject.gate.overflow_action" @change="saveSubject"><option value="allow">{{ t('allow') }}</option><option value="block">{{ t('block') }}</option><option value="reject">{{ t('reject503') }}</option></select></label>
+            <label><span>{{ t('failureAction') }}</span><select v-model="subject.gate.failure_action" @change="saveSubject"><option value="allow">{{ t('failOpen') }}</option><option value="block">{{ t('failClosed') }}</option></select></label>
           </div>
           <div class="inline-switches">
             <label class="switch"><input v-model="subject.enabled" type="checkbox" @change="saveSubject" /><span>{{ t('regulateTraffic') }}</span></label>

@@ -25,7 +25,7 @@ func defaultGatewayConfig() GatewayConfig {
 		Routes:    []Route{{ID: "default-route", Name: "Default route", Enabled: true, Match: Match{PathPrefix: "/"}, UpstreamID: "local-app"}},
 		Subjects: []Subject{{
 			ID: "default", Name: "Default traffic", Enabled: true, Display: true,
-			Match: Match{PathPrefix: "/"}, Gate: Gate{Enabled: false, TimeoutMS: 30_000, TimeoutAction: "block"},
+			Match: Match{PathPrefix: "/"}, Gate: Gate{Enabled: false, TimeoutMS: 30_000, TimeoutAction: "block", MaxPending: 2_000, OverflowAction: "block", FailureAction: "allow"},
 		}},
 		Rules: []Rule{},
 	}
@@ -86,6 +86,12 @@ func normalizeGatewayConfig(config GatewayConfig) GatewayConfig {
 		}
 		if subject.Gate.TimeoutAction != "allow" && subject.Gate.TimeoutAction != "block" {
 			subject.Gate.TimeoutAction = "block"
+		}
+		if subject.Gate.OverflowAction != "allow" && subject.Gate.OverflowAction != "block" && subject.Gate.OverflowAction != "reject" {
+			subject.Gate.OverflowAction = "block"
+		}
+		if subject.Gate.FailureAction != "allow" && subject.Gate.FailureAction != "block" {
+			subject.Gate.FailureAction = "allow"
 		}
 	}
 	for index := range config.Rules {
@@ -166,8 +172,17 @@ func validateGatewayConfig(config GatewayConfig) error {
 		if subject.Gate.TimeoutMS < 0 {
 			return fmt.Errorf("subject %q gate timeout cannot be negative", subject.ID)
 		}
+		if subject.Gate.MaxPending < 0 {
+			return fmt.Errorf("subject %q maximum pending count cannot be negative", subject.ID)
+		}
 		if subject.Gate.TimeoutAction != "allow" && subject.Gate.TimeoutAction != "block" {
 			return fmt.Errorf("subject %q has an invalid timeout action", subject.ID)
+		}
+		if subject.Gate.OverflowAction != "allow" && subject.Gate.OverflowAction != "block" && subject.Gate.OverflowAction != "reject" {
+			return fmt.Errorf("subject %q has an invalid overflow action", subject.ID)
+		}
+		if subject.Gate.FailureAction != "allow" && subject.Gate.FailureAction != "block" {
+			return fmt.Errorf("subject %q has an invalid failure action", subject.ID)
 		}
 		subjects[subject.ID] = struct{}{}
 	}
@@ -218,6 +233,12 @@ func (s *Store) updateSubject(subject Subject) Subject {
 	}
 	if subject.Gate.TimeoutAction != "allow" && subject.Gate.TimeoutAction != "block" {
 		subject.Gate.TimeoutAction = "block"
+	}
+	if subject.Gate.OverflowAction != "allow" && subject.Gate.OverflowAction != "block" && subject.Gate.OverflowAction != "reject" {
+		subject.Gate.OverflowAction = "block"
+	}
+	if subject.Gate.FailureAction != "allow" && subject.Gate.FailureAction != "block" {
+		subject.Gate.FailureAction = "allow"
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

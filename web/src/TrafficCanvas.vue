@@ -50,7 +50,7 @@ const staticParticles = new Map<string, StaticParticle>()
 const retired = new Set<string>()
 
 function colorFor(record: TrafficRecord): number {
-  if (record.action === 'block' || record.action === 'abort' || (record.status ?? 0) >= 400) return 0xff5c70
+  if (record.action === 'block' || record.action === 'reject' || record.action === 'abort' || (record.status ?? 0) >= 400) return 0xff5c70
   if (record.pendingAt && !record.releasedAt && !record.finishedAt) return 0xffc857
   if (record.responseStartedAt) return 0x63e6be
   return 0x75a7ff
@@ -59,7 +59,7 @@ function colorFor(record: TrafficRecord): number {
 function terminalAt(record: TrafficRecord) {
   if (record.finishedAt !== undefined) return record.finishedAt
   if (record.abortedAt !== undefined) return record.abortedAt
-  if (record.action === 'block' && record.blockedAt !== undefined) return record.blockedAt
+  if (record.blockedAt !== undefined) return record.blockedAt
   return undefined
 }
 
@@ -91,7 +91,7 @@ function staticPosition(record: TrafficRecord) {
   const points = requestPoints(record.requestId, app.renderer.width, app.renderer.height)
   if (record.pendingAt && !record.releasedAt && !record.blockedAt && !record.abortedAt && !record.finishedAt) return points.gateway
   if (record.abortedAt) return points.gateway
-  if (record.action === 'block' || record.responseStartedAt) return points.gateway
+  if (record.blockedAt || record.responseStartedAt) return points.gateway
   if (record.finishedAt) return points.client
   return points.upstream
 }
@@ -327,7 +327,7 @@ function render() {
     const waitingAtGate = Boolean(record.pendingAt && !record.releasedAt && !record.blockedAt && !record.abortedAt && !record.responseStartedAt)
     const forwardStart = Math.max(ingressEnd, (record.releasedAt ?? start) + props.renderDelayMs)
     const forwardEnd = forwardStart + forwardDuration
-    const blockedAtGateway = record.action === 'block'
+    const blockedAtGateway = record.blockedAt !== undefined
     const actualResponseStart = record.responseStartedAt === undefined
       ? (record.blockedAt === undefined ? undefined : record.blockedAt + props.renderDelayMs)
       : record.responseStartedAt + props.renderDelayMs

@@ -31,6 +31,30 @@ Routing and traffic control are intentionally separate. A request can be
 routed without being displayed or gated, and multiple subjects can supervise
 different portions of one upstream.
 
+## Manual-gate protection
+
+Each subject gate supports bounded waiting and explicit failure behavior:
+
+```json
+{
+  "enabled": true,
+  "timeout_ms": 30000,
+  "timeout_action": "block",
+  "max_pending": 2000,
+  "overflow_action": "reject",
+  "failure_action": "allow"
+}
+```
+
+- `max_pending`: concurrent waiting requests for this subject; `0` is unlimited.
+- `overflow_action`: `allow`, `block` (403), or `reject` (503).
+- `failure_action`: `allow` for fail-open or `block` for fail-closed when the
+  local pending store cannot reserve a decision slot.
+
+The fast path uses an atomic per-subject counter. If a worker exits before it
+can release a slot, the next overflow attempt reconciles that counter against
+the TTL-backed pending keys before enforcing the limit.
+
 ## Validate and apply
 
 Validate a document without changing the running gateway:
@@ -63,4 +87,3 @@ up to 32 compatible block rules. Configurations with multiple subjects remain
 fully functional but use the Lua compatibility path. This avoids applying one
 subject's native rule to another subject while the multi-subject native format
 is developed.
-

@@ -100,6 +100,71 @@ local function emit(ctx, phase, extra)
   publisher.emit(event)
 end
 
+local function reconcile_pending_count(dict, count_key, subject_id)
+  local count = 0
+  local prefix = "pending:" .. subject_id .. ":"
+  for _, key in ipairs(dict:get_keys(0)) do
+    if string.sub(key, 1, #prefix) == prefix then
+      count = count + 1
+    end
+  end
+  dict:set(count_key, count)
+  return count
+end
+
+local function reserve_pending_slot(dict, subject_id, maximum)
+  local count_key = "pending_count:" .. subject_id
+  local current = dict:incr(count_key, 1, 0)
+  if not current then
+    return false, "storage", count_key
+  end
+  if maximum <= 0 or current <= maximum then
+    return true, nil, count_key
+  end
+  dict:incr(count_key, -1, 0)
+  local actual = reconcile_pending_count(dict, count_key, subject_id)
+  if actual < maximum then
+    current = dict:incr(count_key, 1, 0)
+    if current and current <= maximum then
+      return true, nil, count_key
+    end
+    if current then
+      dict:incr(count_key, -1, 0)
+    end
+  end
+  return false, "overflow", count_key
+end
+
+local function release_pending_slot(dict, count_key)
+  local current = dict:incr(count_key, -1, 0) or 0
+  if current < 0 then
+    dict:set(count_key, 0)
+  end
+end
+
+local function overflow_decision(ctx, gate, reason)
+  local action
+  if reason == "storage" then
+    metrics.increment("gate_storage_failure_total")
+    action = gate.failure_action == "block" and "block" or "allow"
+  else
+    metrics.increment("gate_overflow_total")
+    action = gate.overflow_action
+    if action ~= "allow" and action ~= "reject" then
+      action = "block"
+    end
+    metrics.increment("gate_overflow_" .. action .. "_total")
+  end
+  local status = 0
+  if action == "block" then
+    status = ngx.HTTP_FORBIDDEN
+  elseif action == "reject" then
+    status = ngx.HTTP_SERVICE_UNAVAILABLE
+  end
+  emit(ctx, "request_overflow", { action = action, status = status })
+  return action
+end
+
 local function resolve_pending(ctx, subject)
   local gate = subject.gate or {}
   if not gate.enabled then
@@ -107,15 +172,27 @@ local function resolve_pending(ctx, subject)
   end
 
   local dict = ngx.shared.httpv_pending
-  local pending_key = "pending:" .. ctx.request_id
+  local pending_key = "pending:" .. subject.id .. ":" .. ctx.request_id
+  local pending_index_key = "pending_index:" .. ctx.request_id
   local decision_key = "decision:" .. ctx.request_id
   local gate_epoch = dict:get("gate_epoch") or 0
   local timeout_ms = tonumber(gate.timeout_ms) or 0
+  local maximum = tonumber(gate.max_pending) or 0
+  local reserved, reserve_error, count_key = reserve_pending_slot(dict, subject.id, maximum)
+  if not reserved then
+    return overflow_decision(ctx, gate, reserve_error)
+  end
   local pending_ttl = timeout_ms > 0 and math.max(1, math.ceil(timeout_ms / 1000) + 5) or 0
   local stored = dict:set(pending_key, "1", pending_ttl)
   if not stored then
-    emit(ctx, "request_timeout", { action = "block" })
-    return "block"
+    release_pending_slot(dict, count_key)
+    return overflow_decision(ctx, gate, "storage")
+  end
+  local indexed = dict:set(pending_index_key, pending_key, pending_ttl)
+  if not indexed then
+    dict:delete(pending_key)
+    release_pending_slot(dict, count_key)
+    return overflow_decision(ctx, gate, "storage")
   end
 
   local active = true
@@ -125,7 +202,9 @@ local function resolve_pending(ctx, subject)
     end
     active = false
     dict:delete(pending_key)
+    dict:delete(pending_index_key)
     dict:delete(decision_key)
+    release_pending_slot(dict, count_key)
     metrics.pending_exit()
     return true
   end
@@ -136,6 +215,7 @@ local function resolve_pending(ctx, subject)
   local started = ngx.now()
   ngx.on_abort(function()
     if cleanup_pending() then
+      metrics.increment("gate_client_abort_total")
       emit(ctx, "request_aborted", {
         action = "abort",
         status = 499,
@@ -159,6 +239,7 @@ local function resolve_pending(ctx, subject)
     if timeout_ms > 0 and (ngx.now() - started) * 1000 >= timeout_ms then
       cleanup_pending()
       local action = gate.timeout_action == "allow" and "allow" or "block"
+      metrics.increment("gate_timeout_" .. action .. "_total")
       emit(ctx, "request_timeout", { action = action })
       return action
     end
@@ -214,10 +295,12 @@ function _M.access()
     end
   end
 
-  if resolve_pending(ctx, subject) == "block" then
+  local gate_action = resolve_pending(ctx, subject)
+  if gate_action == "block" or gate_action == "reject" then
+    local status = gate_action == "reject" and ngx.HTTP_SERVICE_UNAVAILABLE or ngx.HTTP_FORBIDDEN
     metrics.increment("blocked_requests_total")
-    emit(ctx, "request_blocked", { action = "block", status = ngx.HTTP_FORBIDDEN })
-    ngx.exit(ngx.HTTP_FORBIDDEN)
+    emit(ctx, "request_blocked", { action = gate_action, status = status })
+    ngx.exit(status)
   end
 end
 
