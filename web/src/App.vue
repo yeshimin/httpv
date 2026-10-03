@@ -22,14 +22,14 @@ const messages: Record<Locale, Record<string, string>> = {
   zh: {
     commandSurface: '流量指挥台', connecting: '连接中', live: '实时连接', closed: '连接断开',
     tracked: '{count} 条已跟踪 · {pending} 条待决', gateOn: '人工闸门：开启', gateOff: '人工闸门：关闭',
-    sendCurrent: '发送当前请求', guidedDemo: '运行 2 秒引导演示', request: '请求', response: '响应',
+    sendCurrent: '发送当前请求', guidedDemo: '发送引导演示', request: '请求', response: '响应',
     waiting: '等待人工决定', blocked: '已阻断', tapParticle: '点击流量粒子查看详情', liveState: '实时状态',
     gateActive: '人工闸门已开启。', gateInstruction: '下一个匹配请求将以黄色粒子暂停，直到你选择放行或阻断。',
     ready: '就绪——运行引导演示以生成一条可见请求。', waitingDecision: '正在等待你的决定——点击黄色粒子，然后选择放行或阻断。',
     flowing: '请求正在流向上游：{method} {path}', returning: '上游已响应——响应正在返回客户端。',
     completed: '已完成：{status}，耗时 {duration}ms。拖尾会短暂保留。', clientAborted: '客户端已断开，请求已经终止。', trafficControls: '流量控制',
     managedPath: '受监管路径', gateTimeout: '闸门超时', timeoutAction: '超时动作', block: '阻断', allow: '放行',
-    regulateTraffic: '监管匹配流量', showEvents: '展示事件', render: '绘制 {value}ms', trail: '拖尾 {value}ms', test: '测试 {value}ms',
+    regulateTraffic: '监管匹配流量', showEvents: '展示事件', render: '绘制 {value}ms', trail: '拖尾 {value}ms',
     selectedRequest: '选中请求', client: '客户端', status: '状态', duration: '耗时', responseSize: '响应大小',
     inFlight: '处理中', unavailable: '不可用', allowPending: '放行待决请求', blockPending: '阻断待决请求',
     blockFuture: '阻断后续匹配流量', selectHint: '点击流量粒子即可查看元数据并执行控制操作。',
@@ -44,14 +44,14 @@ const messages: Record<Locale, Record<string, string>> = {
   en: {
     commandSurface: 'Traffic command surface', connecting: 'connecting', live: 'live', closed: 'closed',
     tracked: '{count} tracked · {pending} waiting', gateOn: 'Manual gate: ON', gateOff: 'Manual gate: OFF',
-    sendCurrent: 'Send current request', guidedDemo: 'Run guided 2s demo', request: 'request', response: 'response',
+    sendCurrent: 'Send current request', guidedDemo: 'Send guided demo', request: 'request', response: 'response',
     waiting: 'waiting for manual decision', blocked: 'blocked', tapParticle: 'tap a particle for details', liveState: 'Live state',
     gateActive: 'Manual gate is active.', gateInstruction: 'The next matching request will pause as a yellow particle until you select Allow or Block.',
     ready: 'Ready — run the guided demo to create one visible request.', waitingDecision: 'Waiting for your decision — tap the yellow particle, then Allow or Block.',
     flowing: 'Request flowing to upstream: {method} {path}', returning: 'Upstream has responded — response is returning to the client.',
     completed: 'Completed: {status} in {duration}ms. Its trail remains visible briefly.', clientAborted: 'The client disconnected and the request has ended.', trafficControls: 'Traffic controls',
     managedPath: 'Managed path', gateTimeout: 'Gate timeout', timeoutAction: 'On timeout', block: 'Block', allow: 'Allow',
-    regulateTraffic: 'Regulate matching traffic', showEvents: 'Show events', render: 'Render {value}ms', trail: 'Trail {value}ms', test: 'Test {value}ms',
+    regulateTraffic: 'Regulate matching traffic', showEvents: 'Show events', render: 'Render {value}ms', trail: 'Trail {value}ms',
     selectedRequest: 'Selected request', client: 'Client', status: 'Status', duration: 'Duration', responseSize: 'Response size',
     inFlight: 'in flight', unavailable: 'not available', allowPending: 'Allow pending', blockPending: 'Block pending',
     blockFuture: 'Block future matches', selectHint: 'Tap a request particle to inspect its metadata and apply a control action.',
@@ -76,7 +76,6 @@ const selectedID = ref<string>()
 const selectedIds = ref<string[]>([])
 const renderDelayMs = ref(0)
 const trailMs = ref(3000)
-const requestDelayMs = ref(1500)
 const connectionState = ref<'connecting' | 'live' | 'closed'>('connecting')
 const locale = ref<Locale>(localStorage.getItem('httpv-locale') === 'en' ? 'en' : 'zh')
 const nowMs = ref(Date.now())
@@ -388,7 +387,7 @@ async function sendTestRequest() {
   try {
     await fetch('/api/demo/burst', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ count: 1, delay_ms: requestDelayMs.value })
+      body: JSON.stringify({ count: 1 })
     })
   } catch {
     // The visual control flow is the subject of this prototype; an unavailable test generator is non-fatal.
@@ -401,7 +400,7 @@ async function sendBurst() {
   try {
     await fetch('/api/demo/burst', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ count: 20, delay_ms: requestDelayMs.value })
+      body: JSON.stringify({ count: 20 })
     })
   } finally {
     window.setTimeout(() => { burstBusy.value = false }, 200)
@@ -411,7 +410,6 @@ async function sendBurst() {
 async function runGuidedDemo() {
   renderDelayMs.value = 0
   trailMs.value = 4000
-  requestDelayMs.value = 2000
   selectedID.value = undefined
   await sendTestRequest()
 }
@@ -482,7 +480,6 @@ onBeforeUnmount(() => {
           <div class="slider-row">
             <label><span>{{ t('render', { value: renderDelayMs }) }}</span><input v-model.number="renderDelayMs" min="0" max="10000" step="25" type="range" /></label>
             <label><span>{{ t('trail', { value: trailMs }) }}</span><input v-model.number="trailMs" min="100" max="10000" step="100" type="range" /></label>
-            <label><span>{{ t('test', { value: requestDelayMs }) }}</span><input v-model.number="requestDelayMs" min="0" max="20000" step="50" type="range" /></label>
           </div>
         </article>
 

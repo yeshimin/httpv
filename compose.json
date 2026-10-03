@@ -15,9 +15,14 @@
     },
     "openresty": {
       "build": {"context": ".", "dockerfile": "openresty/Dockerfile"},
+      "environment": {
+        "HTTPV_UPSTREAM_URL": "http://host.docker.internal:9998",
+        "HTTPV_UPSTREAM_HOST": "127.0.0.1:9998"
+      },
       "ports": ["8088:8088", "127.0.0.1:8091:8091"],
+      "extra_hosts": ["host.docker.internal:host-gateway"],
       "volumes": ["httpv_runtime:/run/httpv"],
-      "depends_on": ["control", "demo", "edge-agent"],
+      "depends_on": ["control", "edge-agent"],
       "networks": ["internal"]
     },
     "demo": {

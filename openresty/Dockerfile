@@ -13,6 +13,8 @@ RUN ./configure --with-compat --add-dynamic-module=/src/ngx_http_httpv_module \
 FROM openresty/openresty:alpine-fat
 RUN mkdir -p /usr/local/openresty/nginx/modules
 COPY --from=native-module-build /src/nginx-1.31.1/objs/ngx_http_httpv_module.so /usr/local/openresty/nginx/modules/
-COPY openresty/nginx.conf /usr/local/openresty/nginx/conf/nginx.conf
+COPY openresty/nginx.conf /usr/local/openresty/nginx/conf/nginx.conf.template
+COPY openresty/entrypoint.sh /usr/local/bin/httpv-openresty-entrypoint
 COPY openresty/lua/ /usr/local/openresty/nginx/lua/
 EXPOSE 8088
+ENTRYPOINT ["/usr/local/bin/httpv-openresty-entrypoint"]

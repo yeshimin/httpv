@@ -762,16 +762,15 @@ func main() {
 	demoClient := &http.Client{}
 	r.Post("/api/demo/burst", func(w http.ResponseWriter, r *http.Request) {
 		var payload struct {
-			Count   int `json:"count"`
-			DelayMS int `json:"delay_ms"`
+			Count int `json:"count"`
 		}
-		if err := decodeJSON(r, &payload); err != nil || payload.Count < 1 || payload.Count > 100 || payload.DelayMS < 0 || payload.DelayMS > 20_000 {
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "count must be 1-100 and delay_ms must be 0-20000"})
+		if err := decodeJSON(r, &payload); err != nil || payload.Count < 1 || payload.Count > 100 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "count must be 1-100"})
 			return
 		}
 		for index := 0; index < payload.Count; index++ {
-			go func(sequence int) {
-				request, err := http.NewRequestWithContext(context.Background(), http.MethodGet, fmt.Sprintf("%s/demo/slow?ms=%d&burst=%d", gatewayURL, payload.DelayMS, sequence), nil)
+			go func() {
+				request, err := http.NewRequestWithContext(context.Background(), http.MethodGet, gatewayURL+"/", nil)
 				if err != nil {
 					return
 				}
@@ -781,7 +780,7 @@ func main() {
 				if err == nil {
 					_ = response.Body.Close()
 				}
-			}(index)
+			}()
 		}
 		writeJSON(w, http.StatusAccepted, map[string]int{"accepted": payload.Count})
 	})

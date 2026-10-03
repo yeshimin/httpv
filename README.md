@@ -39,7 +39,7 @@ to this state file.
 ## What this prototype demonstrates
 
 - A configurable managed-traffic subject (all paths by default).
-- Per-request `request_started`, `request_pending`, `response_started`, and `response_finished` events.
+- Per-request `request_started`, `request_pending`, `request_aborted`, `response_started`, and `response_finished` events.
 - A Vue + PixiJS traffic canvas with adjustable render delay and trail duration.
 - A local OpenResty dynamic block rule that takes effect for subsequent requests.
 - An optional manual gate that holds matching requests until an operator allows or blocks them.
@@ -52,7 +52,13 @@ docker compose -f compose.json up --build
 
 Open the control console at `http://localhost:5173`.
 
-The test traffic gateway is at `http://localhost:8088`. The console's **Send test request** button sends requests to `/demo/slow` through that gateway.
+The test traffic gateway is at `http://localhost:8088`. The local stack forwards
+requests to the real test upstream at `http://127.0.0.1:9998` through Docker's
+host gateway. The console's **Send current request** and burst controls send
+`GET /` requests through the gateway without adding an artificial upstream
+delay. Change `HTTPV_UPSTREAM_URL` and `HTTPV_UPSTREAM_HOST` in `compose.json`
+to target a different upstream. The isolated E2E stack continues to use the
+bundled demo service.
 
 ## Safety notes
 
