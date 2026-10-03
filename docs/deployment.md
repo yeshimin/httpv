@@ -26,6 +26,7 @@ policies, keeps the Control API private, and binds the console to localhost by
 default:
 
 ```sh
+export HTTPV_ADMIN_TOKEN='replace-with-a-long-random-value'
 HTTPV_UPSTREAM_URL=http://host.docker.internal:9998 \
 HTTPV_UPSTREAM_HOST=127.0.0.1:9998 \
 docker compose -f compose.production.json up --build -d
@@ -38,6 +39,8 @@ Optional variables:
 - `HTTPV_CONSOLE_BIND` and `HTTPV_CONSOLE_PORT`: console binding.
 - `HTTPV_EDGE_METRICS_PORT`: localhost metrics port.
 - `HTTPV_VERSION`: local image tag.
+- `HTTPV_ADMIN_TOKEN`: required production administrator token.
+- `HTTPV_OPERATOR_TOKEN` and `HTTPV_VIEWER_TOKEN`: optional lower-privilege tokens.
 
 ## State and backup
 
@@ -51,8 +54,8 @@ backup.
 
 ## Security boundary
 
-The current single-node release does not yet include login, RBAC, TLS
-termination, or control-plane mTLS. Keep the console and internal metrics bound
-to localhost or a trusted administrative network. Put an authenticated reverse
-proxy in front of the console before sharing it with other operators.
-
+The current single-node release includes local token login, three roles, CSRF
+protection, and an audit log. It does not yet include OIDC, TLS termination, or
+control-plane mTLS. Keep the console and internal metrics bound to localhost or
+a trusted administrative network, and put TLS in front of the console before
+sharing it with other operators.

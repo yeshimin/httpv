@@ -12,4 +12,6 @@ docker compose -f compose.e2e.json down -v
 
 The suite checks canvas layout, native policy activation, configuration
 validation, hot route selection, timeout and manual blocking, and overload
-aggregation. The isolated console uses `http://127.0.0.1:15173`.
+aggregation. It also enables synthetic Viewer, Operator, and Admin tokens to
+verify the login page, Cookie session, CSRF enforcement, RBAC, and audit log.
+The isolated console uses `http://127.0.0.1:15173`.

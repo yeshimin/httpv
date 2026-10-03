@@ -8,6 +8,7 @@
         "HTTPV_GATEWAY_URL": "http://openresty:8088",
         "HTTPV_NATIVE_POLICY_PATH": "/run/httpv/policy.bin",
         "HTTPV_CONTROL_STATE_PATH": "/run/httpv/control-state.json",
+        "HTTPV_AUDIT_LOG_PATH": "/run/httpv/audit.jsonl",
         "HTTPV_CONFIG_PATH": "/etc/httpv/httpv.json",
         "HTTPV_DEFAULT_UPSTREAM_URL": "http://host.docker.internal:9998",
         "HTTPV_DEFAULT_UPSTREAM_HOST": "127.0.0.1:9998"

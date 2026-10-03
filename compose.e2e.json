@@ -8,6 +8,10 @@
         "HTTPV_GATEWAY_URL": "http://openresty:8088",
         "HTTPV_NATIVE_POLICY_PATH": "/run/httpv/policy.bin",
         "HTTPV_CONTROL_STATE_PATH": "/run/httpv/control-state.json",
+        "HTTPV_AUDIT_LOG_PATH": "/run/httpv/audit.jsonl",
+        "HTTPV_ADMIN_TOKEN": "httpv-e2e-admin",
+        "HTTPV_OPERATOR_TOKEN": "httpv-e2e-operator",
+        "HTTPV_VIEWER_TOKEN": "httpv-e2e-viewer",
         "HTTPV_DEFAULT_UPSTREAM_URL": "http://demo:9000",
         "HTTPV_DEFAULT_UPSTREAM_HOST": "demo:9000"
       },

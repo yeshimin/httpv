@@ -4,8 +4,9 @@ import re
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from http.cookiejar import CookieJar
 from urllib.error import HTTPError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPCookieProcessor, Request, build_opener, urlopen
 
 from playwright.sync_api import expect, sync_playwright
 
@@ -13,6 +14,10 @@ from playwright.sync_api import expect, sync_playwright
 CONSOLE_URL = os.getenv("HTTPV_E2E_CONSOLE_URL", "http://127.0.0.1:15173")
 CONTROL_URL = os.getenv("HTTPV_E2E_CONTROL_URL", "http://127.0.0.1:18090")
 GATEWAY_URL = os.getenv("HTTPV_E2E_GATEWAY_URL", "http://127.0.0.1:18088")
+ADMIN_TOKEN = os.getenv("HTTPV_E2E_ADMIN_TOKEN", "httpv-e2e-admin")
+COOKIE_JAR = CookieJar()
+OPENER = build_opener(HTTPCookieProcessor(COOKIE_JAR))
+CSRF_TOKEN = ""
 
 
 def api(method, path, payload=None):
@@ -20,8 +25,34 @@ def api(method, path, payload=None):
     request = Request(f"{CONTROL_URL}{path}", data=body, method=method)
     if body is not None:
         request.add_header("Content-Type", "application/json")
-    with urlopen(request, timeout=5) as response:
+    if CSRF_TOKEN and method in {"POST", "PUT", "PATCH", "DELETE"} and path != "/api/auth/login":
+        request.add_header("X-HTTPV-CSRF", CSRF_TOKEN)
+    if path == "/api/pending/block-all":
+        request.add_header("X-HTTPV-Confirm", "block-all-pending")
+    if path.startswith("/api/config/rollback/"):
+        request.add_header("X-HTTPV-Confirm", f"rollback:{path.rsplit('/', 1)[-1]}")
+    with OPENER.open(request, timeout=5) as response:
         return response.status, response.read()
+
+
+def authenticate_api():
+    global CSRF_TOKEN
+    _, raw = api("POST", "/api/auth/login", {"token": ADMIN_TOKEN})
+    CSRF_TOKEN = json.loads(raw)["csrf_token"]
+
+
+def role_request(token, method, path, payload=None):
+    opener = build_opener(HTTPCookieProcessor(CookieJar()))
+    login = Request(f"{CONTROL_URL}/api/auth/login", data=json.dumps({"token": token}).encode(), method="POST", headers={"Content-Type": "application/json"})
+    with opener.open(login, timeout=5) as response:
+        csrf = json.loads(response.read())["csrf_token"]
+    body = None if payload is None else json.dumps(payload).encode()
+    request = Request(f"{CONTROL_URL}{path}", data=body, method=method)
+    if body is not None:
+        request.add_header("Content-Type", "application/json")
+    if method in {"POST", "PUT", "PATCH", "DELETE"}:
+        request.add_header("X-HTTPV-CSRF", csrf)
+    return opener.open(request, timeout=5)
 
 
 def subject(gate_enabled=False, timeout_ms=30_000, timeout_action="block", max_pending=2_000, overflow_action="block", failure_action="allow"):
@@ -54,6 +85,7 @@ class ConsoleE2E(unittest.TestCase):
                 if time.time() >= deadline:
                     raise
                 time.sleep(0.25)
+        authenticate_api()
         cls.playwright = sync_playwright().start()
         cls.browser = cls.playwright.chromium.launch(headless=True)
 
@@ -66,7 +98,11 @@ class ConsoleE2E(unittest.TestCase):
         api("PUT", "/api/subjects/default", subject())
         self.page = self.browser.new_page(viewport={"width": 1440, "height": 900})
         self.page.goto(CONSOLE_URL, wait_until="networkidle")
-        expect(self.page.locator(".status.live")).to_be_visible(timeout=5_000)
+        if self.page.locator(".login-panel").count() > 0:
+            self.page.locator('.login-panel input[type="password"]').fill(ADMIN_TOKEN)
+            self.page.get_by_role("button", name=re.compile("登录|Sign in")).click()
+            self.page.locator(".traffic-canvas").wait_for(state="visible", timeout=10_000)
+        expect(self.page.locator(".status.live")).to_be_visible(timeout=10_000)
 
     def tearDown(self):
         self.page.close()
@@ -76,6 +112,29 @@ class ConsoleE2E(unittest.TestCase):
         expect(canvas).to_be_visible()
         self.assertGreater(canvas.evaluate("node => node.clientHeight"), 300)
         self.assertEqual(self.page.locator(".lane-label").all_text_contents(), ["Client", "OpenResty", "Upstream"])
+        expect(self.page.locator(".role-state")).to_contain_text(re.compile("管理员|admin"))
+
+    def test_audit_records_authenticated_changes(self):
+        _, raw = api("GET", "/api/audit?limit=50")
+        entries = json.loads(raw)["entries"]
+        actions = {entry["action"] for entry in entries}
+        self.assertIn("auth.login", actions)
+        self.assertIn("subject.update", actions)
+        self.assertNotIn(ADMIN_TOKEN, raw.decode())
+
+    def test_rbac_enforces_viewer_and_operator_roles(self):
+        with role_request("httpv-e2e-viewer", "GET", "/api/config") as response:
+            self.assertEqual(response.status, 200)
+        with self.assertRaises(HTTPError) as viewer_error:
+            role_request("httpv-e2e-viewer", "POST", "/api/demo/burst", {"count": 1})
+        self.assertEqual(viewer_error.exception.code, 403)
+
+        with role_request("httpv-e2e-operator", "POST", "/api/demo/burst", {"count": 1}) as response:
+            self.assertEqual(response.status, 202)
+        _, raw = api("GET", "/api/config")
+        with self.assertRaises(HTTPError) as operator_error:
+            role_request("httpv-e2e-operator", "PUT", "/api/config", json.loads(raw))
+        self.assertEqual(operator_error.exception.code, 403)
 
     def test_native_policy_has_worker_ack(self):
         deadline = time.time() + 5
@@ -150,7 +209,7 @@ class ConsoleE2E(unittest.TestCase):
     def test_manual_block_decision_completes(self):
         api("PUT", "/api/subjects/default", subject(True, 5_000, "block"))
         self.page.reload(wait_until="networkidle")
-        expect(self.page.locator(".status.live")).to_be_visible(timeout=5_000)
+        expect(self.page.locator(".status.live")).to_be_visible(timeout=10_000)
         started_at = int(time.time() * 1000)
         api("POST", "/api/demo/burst", {"count": 1})
         deadline = time.time() + 5

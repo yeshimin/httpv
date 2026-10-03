@@ -380,7 +380,7 @@ func (h *Hub) run(ctx context.Context) {
 }
 
 func (h *Hub) serveWS(w http.ResponseWriter, r *http.Request) {
-	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	upgrader := websocket.Upgrader{CheckOrigin: sameOrigin}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
@@ -529,9 +529,14 @@ func decodeJSON(r *http.Request, target any) error {
 
 func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		allowedOrigin := strings.TrimSpace(os.Getenv("HTTPV_CORS_ORIGIN"))
+		if allowedOrigin != "" && r.Header.Get("Origin") == allowedOrigin {
+			w.Header().Set("Access-Control-Allow-Origin", allowedOrigin)
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			w.Header().Set("Vary", "Origin")
+		}
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-HTTPV-CSRF, X-HTTPV-Confirm")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
@@ -688,6 +693,8 @@ func main() {
 	}
 	openresty := &OpenRestyClient{baseURL: adminURL, client: &http.Client{Timeout: 2 * time.Second}}
 	nativePolicy := newNativePolicyPublisher(os.Getenv("HTTPV_NATIVE_POLICY_PATH"))
+	auth := newAuthManagerFromEnv()
+	audit := newAuditLogger(os.Getenv("HTTPV_AUDIT_LOG_PATH"))
 	persistStore := func() error { return store.persist(statePath) }
 	syncGatewayConfig := func() error {
 		config := store.config()
@@ -730,6 +737,7 @@ func main() {
 	}()
 
 	r := chi.NewRouter()
+	r.Use(auth.middleware)
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{
 			"service": "httpv-control",
@@ -740,6 +748,47 @@ func main() {
 	})
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+	r.Get("/api/auth/status", func(w http.ResponseWriter, r *http.Request) {
+		_, session, authenticated := auth.session(r)
+		response := map[string]any{"enabled": auth.enabled(), "authenticated": authenticated}
+		if authenticated {
+			response["role"] = session.Role.String()
+			response["csrf_token"] = session.CSRFToken
+		}
+		writeJSON(w, http.StatusOK, response)
+	})
+	r.Post("/api/auth/login", func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Token string `json:"token"`
+		}
+		if err := decodeJSON(r, &payload); err != nil {
+			audit.record(r, "auth.login", "", "failure")
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid login payload"})
+			return
+		}
+		sessionID, session, ok := auth.login(payload.Token)
+		if !ok {
+			audit.record(r, "auth.login", "", "failure")
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid token"})
+			return
+		}
+		if auth.enabled() {
+			writeSessionCookie(w, r, sessionID, auth.ttl)
+		}
+		auditRequest := r.WithContext(context.WithValue(r.Context(), authContextKey{}, session.Role))
+		audit.record(auditRequest, "auth.login", "", "success")
+		writeJSON(w, http.StatusOK, map[string]any{"authenticated": true, "role": session.Role.String(), "csrf_token": session.CSRFToken})
+	})
+	r.Post("/api/auth/logout", func(w http.ResponseWriter, r *http.Request) {
+		sessionID, _ := r.Context().Value(sessionCookieName).(string)
+		auth.logout(sessionID)
+		clearSessionCookie(w, r)
+		audit.record(r, "auth.logout", "", "success")
+		writeJSON(w, http.StatusOK, map[string]string{"status": "logged_out"})
+	})
+	r.Get("/api/audit", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{"entries": audit.recent(auditLimit(r))})
 	})
 	r.Get("/api/ws", hub.serveWS)
 	r.Get("/api/bootstrap", func(w http.ResponseWriter, r *http.Request) {
@@ -777,12 +826,17 @@ func main() {
 			return
 		}
 		w.Header().Set("X-HTTPV-Config-Revision", strconv.FormatUint(revision, 10))
+		audit.record(r, "config.apply", strconv.FormatUint(revision, 10), "success")
 		writeJSON(w, http.StatusOK, store.config())
 	})
 	r.Post("/api/config/rollback/{revision}", func(w http.ResponseWriter, r *http.Request) {
 		target, err := strconv.ParseUint(chi.URLParam(r, "revision"), 10, 64)
 		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid configuration revision"})
+			return
+		}
+		if !requireConfirmation(w, r, "rollback:"+strconv.FormatUint(target, 10)) {
+			audit.record(r, "config.rollback", strconv.FormatUint(target, 10), "rejected")
 			return
 		}
 		revision, err := store.rollbackConfig(target)
@@ -799,6 +853,7 @@ func main() {
 			return
 		}
 		w.Header().Set("X-HTTPV-Config-Revision", strconv.FormatUint(revision, 10))
+		audit.record(r, "config.rollback", strconv.FormatUint(target, 10), "success")
 		writeJSON(w, http.StatusOK, map[string]any{"revision": revision, "config": store.config()})
 	})
 	r.Get("/api/events", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, http.StatusOK, store.recentEvents(500)) })
@@ -860,6 +915,7 @@ func main() {
 				break
 			}
 		}
+		audit.record(r, "subject.update", subject.ID, "success")
 		writeJSON(w, http.StatusOK, subject)
 	})
 	r.Post("/api/rules", func(w http.ResponseWriter, r *http.Request) {
@@ -894,6 +950,7 @@ func main() {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "OpenResty has not accepted the rule"})
 			return
 		}
+		audit.record(r, "rule.create", rule.ID, "success")
 		writeJSON(w, http.StatusCreated, rule)
 	})
 	r.Delete("/api/rules/{id}", func(w http.ResponseWriter, r *http.Request) {
@@ -909,6 +966,7 @@ func main() {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "OpenResty has not accepted the configuration"})
 			return
 		}
+		audit.record(r, "rule.delete", chi.URLParam(r, "id"), "success")
 		writeJSON(w, http.StatusNoContent, nil)
 	})
 	r.Post("/api/pending/{id}", func(w http.ResponseWriter, r *http.Request) {
@@ -923,6 +981,7 @@ func main() {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "pending request is no longer available"})
 			return
 		}
+		audit.record(r, "pending.decide", chi.URLParam(r, "id")+":"+payload.Action, "success")
 		writeJSON(w, http.StatusOK, map[string]string{"status": "accepted"})
 	})
 	r.Post("/api/pending/decide-batch", func(w http.ResponseWriter, r *http.Request) {
@@ -938,13 +997,19 @@ func main() {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "OpenResty has not accepted the batch decision"})
 			return
 		}
+		audit.record(r, "pending.decide_batch", strconv.Itoa(len(payload.RequestIDs))+":"+payload.Action, "success")
 		writeJSON(w, http.StatusOK, map[string]int{"accepted": len(payload.RequestIDs)})
 	})
 	r.Post("/api/pending/block-all", func(w http.ResponseWriter, r *http.Request) {
+		if !requireConfirmation(w, r, "block-all-pending") {
+			audit.record(r, "pending.block_all", "", "rejected")
+			return
+		}
 		if err := openresty.blockAllPending(); err != nil {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "OpenResty has not accepted the emergency action"})
 			return
 		}
+		audit.record(r, "pending.block_all", "", "success")
 		writeJSON(w, http.StatusOK, map[string]string{"status": "accepted"})
 	})
 

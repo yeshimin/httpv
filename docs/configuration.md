@@ -94,6 +94,9 @@ Roll back to a retained revision:
 curl -fsS -X POST http://127.0.0.1:5173/api/config/rollback/3
 ```
 
+Rollback also requires `X-HTTPV-Confirm: rollback:3`. When authentication is
+enabled, include the authenticated session cookie and its `X-HTTPV-CSRF` token.
+
 Rollback is append-only: restoring revision 3 creates a new current revision
 instead of deleting later history. `GET /api/config`, configuration updates,
 and rollback responses expose the current value in the

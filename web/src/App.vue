@@ -18,6 +18,7 @@ type TrafficSummary = {
   finished: number; pending: number; blocked: number; paths: TrafficSummaryPath[]
 }
 type NativePolicyStatus = { version: number; state: 'active' | 'pending' | 'unpublished' | 'disabled'; mode?: 'native' | 'lua_fallback' | 'disabled'; acks: { worker: string; version: number }[] }
+type AuthStatus = { enabled: boolean; authenticated: boolean; role?: 'viewer' | 'operator' | 'admin'; csrf_token?: string }
 
 type Locale = 'zh' | 'en'
 const messages: Record<Locale, Record<string, string>> = {
@@ -39,13 +40,14 @@ const messages: Record<Locale, Record<string, string>> = {
     pendingRemaining: '待人工决定，剩余 {seconds} 秒', pendingInfinite: '待人工决定，等待人工操作', batchRemaining: '待决倒计时：最早 {min} 秒，最晚 {max} 秒', decisionExpired: '该请求已不再等待人工决定。',
     allowedForwarding: '已放行——正在转发上游并等待响应。', dragSelect: '在画布空白处拖拽可框选多个请求', selectedCount: '已选 {count} 条请求',
     selectedPending: '其中 {count} 条仍待人工决定', batchHistory: '这些请求已经结束；只能为后续同类流量创建规则。', allowSelected: '放行选中待决请求', blockSelected: '阻断选中待决请求', blockSelectedFuture: '阻断选中路径的后续流量',
-    burst: '并发 20 条', emergencyBlock: '紧急阻断全部待决', rendering: '绘制 {shown}/{total}',
+    burst: '并发 20 条', emergencyBlock: '紧急阻断全部待决', confirmEmergency: '确认阻断当前全部待决请求？此操作会立即终止这些请求。', rendering: '绘制 {shown}/{total}',
     overloadMode: '高流量聚合', overloadSummary: '已聚合 {total} 个普通事件 · {rate}/秒', overloadHint: '待决和阻断请求仍逐条展示、可直接操作。', blockFlow: '阻断此流量',
     policyActive: '策略 C v{version} 已生效', policyFallback: '策略 v{version} 已同步 · Lua 兼容路径', policyPending: '策略 C v{version} 同步中', policyDisabled: '策略 C 未启用',
     activeFlows: '活跃', rate: '速率', p95: 'P95', overview: '概览', headers: 'Header', body: 'Body',
     requestId: '请求 ID', subject: '监管对象', requestSize: '请求大小', started: '开始时间', finished: '完成时间',
     requestHeaders: '请求 Header', responseHeaders: '响应 Header', requestBody: '请求 Body', responseBody: '响应 Body',
-    captureOff: '内容采集尚未开启。后续将按规则限长、脱敏并默认关闭。', managedSubject: '监管对象', topology: '{routes} 条路由 · {upstreams} 个上游'
+    captureOff: '内容采集尚未开启。后续将按规则限长、脱敏并默认关闭。', managedSubject: '监管对象', topology: '{routes} 条路由 · {upstreams} 个上游',
+    signIn: '登录 HTTPV', accessToken: '访问 Token', signInAction: '登录', invalidToken: 'Token 无效或登录失败', signOut: '退出', roleViewer: '只读', roleOperator: '操作员', roleAdmin: '管理员'
   },
   en: {
     commandSurface: 'Traffic command surface', connecting: 'connecting', live: 'live', closed: 'closed',
@@ -65,13 +67,14 @@ const messages: Record<Locale, Record<string, string>> = {
     pendingRemaining: 'Waiting for a decision — {seconds}s remaining', pendingInfinite: 'Waiting for a manual decision', batchRemaining: 'Pending countdown: {min}s earliest, {max}s latest', decisionExpired: 'This request is no longer waiting for a decision.',
     allowedForwarding: 'Allowed — forwarding to the upstream and awaiting its response.', dragSelect: 'Drag across empty canvas space to box-select requests', selectedCount: '{count} requests selected',
     selectedPending: '{count} still waiting for a decision', batchHistory: 'These requests have completed; only future-match rules can be created.', allowSelected: 'Allow selected pending', blockSelected: 'Block selected pending', blockSelectedFuture: 'Block future traffic for selected paths',
-    burst: 'Burst ×20', emergencyBlock: 'Emergency block all waiting', rendering: 'rendering {shown}/{total}',
+    burst: 'Burst ×20', emergencyBlock: 'Emergency block all waiting', confirmEmergency: 'Block every currently waiting request? This immediately terminates those requests.', rendering: 'rendering {shown}/{total}',
     overloadMode: 'High-traffic aggregation', overloadSummary: '{total} ordinary events aggregated · {rate}/s', overloadHint: 'Waiting and blocked requests remain individually visible and actionable.', blockFlow: 'Block this flow',
     policyActive: 'Policy C v{version} active', policyFallback: 'Policy v{version} synced · Lua compatibility path', policyPending: 'Policy C v{version} syncing', policyDisabled: 'Policy C disabled',
     activeFlows: 'active', rate: 'rate', p95: 'P95', overview: 'Overview', headers: 'Headers', body: 'Body',
     requestId: 'Request ID', subject: 'Subject', requestSize: 'Request size', started: 'Started', finished: 'Finished',
     requestHeaders: 'Request headers', responseHeaders: 'Response headers', requestBody: 'Request body', responseBody: 'Response body',
-    captureOff: 'Content capture is not enabled. It will be opt-in, size-limited, and redacted.', managedSubject: 'Managed subject', topology: '{routes} routes · {upstreams} upstreams'
+    captureOff: 'Content capture is not enabled. It will be opt-in, size-limited, and redacted.', managedSubject: 'Managed subject', topology: '{routes} routes · {upstreams} upstreams',
+    signIn: 'Sign in to HTTPV', accessToken: 'Access token', signInAction: 'Sign in', invalidToken: 'Invalid token or sign-in failed', signOut: 'Sign out', roleViewer: 'viewer', roleOperator: 'operator', roleAdmin: 'admin'
   }
 }
 
@@ -96,12 +99,26 @@ const nowMs = ref(Date.now())
 const burstBusy = ref(false)
 const overloadSummary = ref<TrafficSummary>()
 const policyStatus = ref<NativePolicyStatus>({ version: 0, state: 'unpublished', acks: [] })
+const authStatus = ref<AuthStatus>({ enabled: false, authenticated: false })
+const authReady = ref(false)
+const csrfToken = ref('')
+const loginToken = ref('')
+const loginError = ref('')
 const timeoutEventGraceMs = 2_000
 let socket: WebSocket | undefined
 let clockTimer: number | undefined
 let policyTimer: number | undefined
 let eventFrame: number | undefined
 const eventQueue: EventMessage[] = []
+const canOperate = computed(() => authStatus.value.role === 'operator' || authStatus.value.role === 'admin')
+const canAdmin = computed(() => authStatus.value.role === 'admin')
+
+async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}) {
+  const headers = new Headers(init.headers)
+  const method = (init.method ?? 'GET').toUpperCase()
+  if (csrfToken.value && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) headers.set('X-HTTPV-CSRF', csrfToken.value)
+  return fetch(input, { ...init, headers, credentials: 'same-origin' })
+}
 
 function t(key: string, values: Record<string, string | number> = {}) {
   return (messages[locale.value][key] ?? key).replace(/\{(\w+)\}/g, (_, name: string) => String(values[name] ?? `{${name}}`))
@@ -281,7 +298,7 @@ function summaryRate(summary: TrafficSummary) {
 }
 
 async function bootstrap() {
-  const response = await fetch('/api/bootstrap')
+  const response = await apiFetch('/api/bootstrap')
   if (!response.ok) throw new Error('Unable to load control state')
   const data = await response.json()
   subjects.value = data.config.subjects
@@ -303,7 +320,7 @@ async function bootstrap() {
 
 async function refreshPolicyStatus() {
   try {
-    const response = await fetch('/api/policy-status')
+    const response = await apiFetch('/api/policy-status')
     if (response.ok) policyStatus.value = await response.json() as NativePolicyStatus
   } catch {
     // Policy status is advisory; a transient control-plane read must not affect traffic control.
@@ -327,7 +344,7 @@ function connect() {
 }
 
 async function saveSubject() {
-  const response = await fetch(`/api/subjects/${encodeURIComponent(subject.value.id)}`, {
+  const response = await apiFetch(`/api/subjects/${encodeURIComponent(subject.value.id)}`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(subject.value)
   })
   if (!response.ok) { alert('OpenResty has not accepted the configuration yet.'); return }
@@ -346,7 +363,7 @@ async function decide(action: 'allow' | 'block') {
     alert(t('decisionExpired'))
     return
   }
-  const response = await fetch(`/api/pending/${selected.value.requestId}`, {
+  const response = await apiFetch(`/api/pending/${selected.value.requestId}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action })
   })
   if (!response.ok) alert(t('decisionExpired'))
@@ -371,7 +388,7 @@ async function decideSelected(action: 'allow' | 'block') {
     alert(t('decisionExpired'))
     return
   }
-  const response = await fetch('/api/pending/decide-batch', {
+  const response = await apiFetch('/api/pending/decide-batch', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ request_ids: pending.map((record) => record.requestId), action })
   })
@@ -379,14 +396,15 @@ async function decideSelected(action: 'allow' | 'block') {
 }
 
 async function blockAllPending() {
-  const response = await fetch('/api/pending/block-all', { method: 'POST' })
+  if (!window.confirm(t('confirmEmergency'))) return
+  const response = await apiFetch('/api/pending/block-all', { method: 'POST', headers: { 'X-HTTPV-Confirm': 'block-all-pending' } })
   if (!response.ok) alert(t('decisionExpired'))
 }
 
 async function blockSelectedPaths() {
   const unique = new Map(selectedRecords.value.map((record) => [`${record.method}:${record.path}`, record]))
   const created = await Promise.all([...unique.values()].map(async (record) => {
-    const response = await fetch('/api/rules', {
+    const response = await apiFetch('/api/rules', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ subject_id: record.subjectId, action: 'block', path_prefix: record.path, method: record.method, client_ip: '' })
     })
@@ -397,7 +415,7 @@ async function blockSelectedPaths() {
 
 async function blockPath() {
   if (!selected.value) return
-  const response = await fetch('/api/rules', {
+  const response = await apiFetch('/api/rules', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ subject_id: selected.value.subjectId, action: 'block', path_prefix: selected.value.path, method: selected.value.method, client_ip: '' })
   })
@@ -407,7 +425,7 @@ async function blockPath() {
 
 async function blockAggregatePath(path: TrafficSummaryPath) {
   if (!path.path || path.path === 'other') return
-  const response = await fetch('/api/rules', {
+  const response = await apiFetch('/api/rules', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ subject_id: path.subject_id, action: 'block', path_prefix: path.path, method: path.method, client_ip: '' })
   })
@@ -416,13 +434,13 @@ async function blockAggregatePath(path: TrafficSummaryPath) {
 }
 
 async function removeRule(id: string) {
-  const response = await fetch(`/api/rules/${id}`, { method: 'DELETE' })
+  const response = await apiFetch(`/api/rules/${id}`, { method: 'DELETE' })
   if (response.ok) rules.value = rules.value.filter((rule) => rule.id !== id)
 }
 
 async function sendTestRequest() {
   try {
-    await fetch('/api/demo/burst', {
+    await apiFetch('/api/demo/burst', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ count: 1 })
     })
@@ -435,7 +453,7 @@ async function sendBurst() {
   if (burstBusy.value) return
   burstBusy.value = true
   try {
-    await fetch('/api/demo/burst', {
+    await apiFetch('/api/demo/burst', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ count: 20 })
     })
@@ -456,7 +474,14 @@ function formatTimestamp(value?: number) {
   return new Date(value).toLocaleTimeString(locale.value === 'zh' ? 'zh-CN' : 'en-US', { hour12: false, fractionalSecondDigits: 3 })
 }
 
-onMounted(async () => {
+function roleLabel() {
+  if (authStatus.value.role === 'admin') return t('roleAdmin')
+  if (authStatus.value.role === 'operator') return t('roleOperator')
+  return t('roleViewer')
+}
+
+async function startConsole() {
+  if (clockTimer !== undefined) return
   clockTimer = window.setInterval(() => {
     nowMs.value = Date.now()
     pruneExpiredRecords()
@@ -465,6 +490,37 @@ onMounted(async () => {
   try { await bootstrap() } catch (error) { console.error(error) }
   await refreshPolicyStatus()
   connect()
+}
+
+async function signIn() {
+  loginError.value = ''
+  const response = await fetch('/api/auth/login', {
+    method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token: loginToken.value })
+  })
+  if (!response.ok) {
+    loginError.value = t('invalidToken')
+    return
+  }
+  location.reload()
+}
+
+async function signOut() {
+  await apiFetch('/api/auth/logout', { method: 'POST' })
+  location.reload()
+}
+
+onMounted(async () => {
+  try {
+    const response = await fetch('/api/auth/status', { credentials: 'same-origin' })
+    if (!response.ok) throw new Error('auth status unavailable')
+    authStatus.value = await response.json() as AuthStatus
+    csrfToken.value = authStatus.value.csrf_token ?? ''
+  } catch {
+    authStatus.value = { enabled: true, authenticated: false }
+  }
+  authReady.value = true
+  if (authStatus.value.authenticated) await startConsole()
 })
 onBeforeUnmount(() => {
   socket?.close()
@@ -475,13 +531,25 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <main class="app-shell">
+  <div v-if="!authReady" class="auth-shell"></div>
+  <section v-else-if="authStatus.enabled && !authStatus.authenticated" class="auth-shell">
+    <form class="login-panel" @submit.prevent="signIn">
+      <p class="eyebrow">HTTPV / CONTROL PLANE</p>
+      <h1>{{ t('signIn') }}</h1>
+      <label><span>{{ t('accessToken') }}</span><input v-model="loginToken" type="password" autocomplete="current-password" autofocus /></label>
+      <p v-if="loginError" class="login-error">{{ loginError }}</p>
+      <button class="test-button" type="submit">{{ t('signInAction') }}</button>
+    </form>
+  </section>
+  <main v-else class="app-shell">
     <header class="topbar">
       <p class="eyebrow">HTTPV / LOCAL PROTOTYPE</p>
       <div class="topbar-right">
         <div class="policy-state" :class="policyStatus.state">{{ policyLabel }}</div>
+        <span v-if="authStatus.enabled" class="role-state">{{ roleLabel() }}</span>
         <label class="language-picker"><span>{{ t('language') }}</span><select :value="locale" @change="onLocaleChange"><option value="zh">中文</option><option value="en">English</option></select></label>
         <div class="status" :class="connectionState"><span></span>{{ t(connectionState) }}</div>
+        <button v-if="authStatus.enabled" class="sign-out" @click="signOut">{{ t('signOut') }}</button>
       </div>
     </header>
 
@@ -495,16 +563,16 @@ onBeforeUnmount(() => {
             <span><b>{{ p95Duration }}</b>{{ t('p95') }}<i v-if="p95Duration !== '—'">ms</i></span>
           </div>
           <div class="header-actions">
-            <button class="gate-toggle" :class="{ active: subject.gate.enabled }" @click="toggleGate">{{ subject.gate.enabled ? t('gateOn') : t('gateOff') }}</button>
-            <button v-if="pendingCount > 0" class="emergency-button" @click="blockAllPending">{{ t('emergencyBlock') }}</button>
-            <button class="outline compact" @click="sendTestRequest">{{ t('sendCurrent') }}</button>
-            <button class="outline compact" :disabled="burstBusy" @click="sendBurst">{{ t('burst') }}</button>
-            <button class="test-button" @click="runGuidedDemo">{{ t('guidedDemo') }}</button>
+            <button class="gate-toggle" :class="{ active: subject.gate.enabled }" :disabled="!canAdmin" @click="toggleGate">{{ subject.gate.enabled ? t('gateOn') : t('gateOff') }}</button>
+            <button v-if="pendingCount > 0" class="emergency-button" :disabled="!canOperate" @click="blockAllPending">{{ t('emergencyBlock') }}</button>
+            <button class="outline compact" :disabled="!canOperate" @click="sendTestRequest">{{ t('sendCurrent') }}</button>
+            <button class="outline compact" :disabled="burstBusy || !canOperate" @click="sendBurst">{{ t('burst') }}</button>
+            <button class="test-button" :disabled="!canOperate" @click="runGuidedDemo">{{ t('guidedDemo') }}</button>
           </div>
         </div>
         <div v-if="overloadActive && overloadSummary" class="overload-strip">
           <div class="overload-copy"><b>{{ t('overloadMode') }}</b><span>{{ t('overloadSummary', { total: overloadSummary.total, rate: summaryRate(overloadSummary) }) }}</span><small>{{ t('overloadHint') }}</small></div>
-          <div class="overload-paths"><button v-for="path in overloadSummary.paths" :key="`${path.subject_id}:${path.method}:${path.path}`" :disabled="!path.path || path.path === 'other'" @click="blockAggregatePath(path)"><span>{{ path.method || '*' }} {{ path.path || '*' }}</span><b>{{ path.count }}</b><em>{{ t('blockFlow') }}</em></button></div>
+          <div class="overload-paths"><button v-for="path in overloadSummary.paths" :key="`${path.subject_id}:${path.method}:${path.path}`" :disabled="!canOperate || !path.path || path.path === 'other'" @click="blockAggregatePath(path)"><span>{{ path.method || '*' }} {{ path.path || '*' }}</span><b>{{ path.count }}</b><em>{{ t('blockFlow') }}</em></button></div>
         </div>
         <TrafficCanvas :records="records" :animated-ids="animatedIds" :render-delay-ms="renderDelayMs" :trail-ms="trailMs" :selected-ids="selectedIds" @select="selectOne" @select-many="selectMany" />
         <div class="legend"><span class="legend-blue"></span>{{ t('request') }} <span class="legend-green"></span>{{ t('response') }} <span class="legend-yellow"></span>{{ t('waiting') }} <span class="legend-red"></span>{{ t('blocked') }} · {{ t('tapParticle') }} · {{ t('dragSelect') }}</div>
@@ -519,18 +587,18 @@ onBeforeUnmount(() => {
             <label class="subject-picker"><span>{{ t('managedSubject') }}</span><select :value="subject.id" @change="onSubjectChange"><option v-for="candidate in subjects" :key="candidate.id" :value="candidate.id">{{ candidate.name }}</option></select></label>
           </div>
           <div class="field-row">
-            <label><span>{{ t('managedPath') }}</span><input v-model="subject.match.path_prefix" @change="saveSubject" /></label>
-            <label><span>{{ t('gateTimeout') }}</span><input v-model.number="subject.gate.timeout_ms" min="0" step="1000" type="number" @change="saveSubject" /></label>
-            <label><span>{{ t('timeoutAction') }}</span><select v-model="subject.gate.timeout_action" @change="saveSubject"><option value="block">{{ t('block') }}</option><option value="allow">{{ t('allow') }}</option></select></label>
+            <label><span>{{ t('managedPath') }}</span><input v-model="subject.match.path_prefix" :disabled="!canAdmin" @change="saveSubject" /></label>
+            <label><span>{{ t('gateTimeout') }}</span><input v-model.number="subject.gate.timeout_ms" :disabled="!canAdmin" min="0" step="1000" type="number" @change="saveSubject" /></label>
+            <label><span>{{ t('timeoutAction') }}</span><select v-model="subject.gate.timeout_action" :disabled="!canAdmin" @change="saveSubject"><option value="block">{{ t('block') }}</option><option value="allow">{{ t('allow') }}</option></select></label>
           </div>
           <div class="field-row protection-row">
-            <label><span>{{ t('maxPending') }}</span><input v-model.number="subject.gate.max_pending" min="0" step="100" type="number" @change="saveSubject" /></label>
-            <label><span>{{ t('overflowAction') }}</span><select v-model="subject.gate.overflow_action" @change="saveSubject"><option value="allow">{{ t('allow') }}</option><option value="block">{{ t('block') }}</option><option value="reject">{{ t('reject503') }}</option></select></label>
-            <label><span>{{ t('failureAction') }}</span><select v-model="subject.gate.failure_action" @change="saveSubject"><option value="allow">{{ t('failOpen') }}</option><option value="block">{{ t('failClosed') }}</option></select></label>
+            <label><span>{{ t('maxPending') }}</span><input v-model.number="subject.gate.max_pending" :disabled="!canAdmin" min="0" step="100" type="number" @change="saveSubject" /></label>
+            <label><span>{{ t('overflowAction') }}</span><select v-model="subject.gate.overflow_action" :disabled="!canAdmin" @change="saveSubject"><option value="allow">{{ t('allow') }}</option><option value="block">{{ t('block') }}</option><option value="reject">{{ t('reject503') }}</option></select></label>
+            <label><span>{{ t('failureAction') }}</span><select v-model="subject.gate.failure_action" :disabled="!canAdmin" @change="saveSubject"><option value="allow">{{ t('failOpen') }}</option><option value="block">{{ t('failClosed') }}</option></select></label>
           </div>
           <div class="inline-switches">
-            <label class="switch"><input v-model="subject.enabled" type="checkbox" @change="saveSubject" /><span>{{ t('regulateTraffic') }}</span></label>
-            <label class="switch"><input v-model="subject.display" type="checkbox" @change="saveSubject" /><span>{{ t('showEvents') }}</span></label>
+            <label class="switch"><input v-model="subject.enabled" :disabled="!canAdmin" type="checkbox" @change="saveSubject" /><span>{{ t('regulateTraffic') }}</span></label>
+            <label class="switch"><input v-model="subject.display" :disabled="!canAdmin" type="checkbox" @change="saveSubject" /><span>{{ t('showEvents') }}</span></label>
           </div>
           <div class="slider-row">
             <label><span>{{ t('render', { value: renderDelayMs }) }}</span><input v-model.number="renderDelayMs" min="0" max="10000" step="25" type="range" /></label>
@@ -561,9 +629,9 @@ onBeforeUnmount(() => {
           <div v-else class="capture-grid"><section><b>{{ t('requestBody') }}</b><pre>{{ t('captureOff') }}</pre></section><section><b>{{ t('responseBody') }}</b><pre>{{ t('captureOff') }}</pre></section></div>
           <div class="actions">
             <p v-if="selected.pendingAt && !selected.releasedAt && !selected.blockedAt && !selected.abortedAt && !selected.finishedAt" class="pending-countdown" :class="{ expired: !selectedPendingActive }">{{ selectedPendingActive ? selectedPendingLabel : t('decisionExpired') }}</p>
-            <button :disabled="!selectedPendingActive" class="allow" @click="decide('allow')">{{ t('allowPending') }}</button>
-            <button :disabled="!selectedPendingActive" class="block" @click="decide('block')">{{ t('blockPending') }}</button>
-            <button class="outline" @click="blockPath">{{ t('blockFuture') }}</button>
+            <button :disabled="!canOperate || !selectedPendingActive" class="allow" @click="decide('allow')">{{ t('allowPending') }}</button>
+            <button :disabled="!canOperate || !selectedPendingActive" class="block" @click="decide('block')">{{ t('blockPending') }}</button>
+            <button class="outline" :disabled="!canOperate" @click="blockPath">{{ t('blockFuture') }}</button>
           </div>
         </template>
         <template v-else-if="selectedRecords.length > 0">
@@ -572,9 +640,9 @@ onBeforeUnmount(() => {
           <p v-if="selectedPendingRecords.length > 0" class="pending-countdown">{{ batchPendingRemaining }}</p>
           <p v-if="selectedPendingRecords.length === 0" class="hint">{{ t('batchHistory') }}</p>
           <div class="actions">
-            <button :disabled="selectedPendingRecords.length === 0" class="allow" @click="decideSelected('allow')">{{ t('allowSelected') }}</button>
-            <button :disabled="selectedPendingRecords.length === 0" class="block" @click="decideSelected('block')">{{ t('blockSelected') }}</button>
-            <button class="outline" @click="blockSelectedPaths">{{ t('blockSelectedFuture') }}</button>
+            <button :disabled="!canOperate || selectedPendingRecords.length === 0" class="allow" @click="decideSelected('allow')">{{ t('allowSelected') }}</button>
+            <button :disabled="!canOperate || selectedPendingRecords.length === 0" class="block" @click="decideSelected('block')">{{ t('blockSelected') }}</button>
+            <button class="outline" :disabled="!canOperate" @click="blockSelectedPaths">{{ t('blockSelectedFuture') }}</button>
           </div>
         </template>
         <p v-else class="hint">{{ t('selectHint') }}</p>
@@ -584,7 +652,7 @@ onBeforeUnmount(() => {
           <h2>{{ t('activeRules') }}</h2>
           <p v-if="rules.length === 0" class="hint">{{ t('noRules') }}</p>
         <ul v-else>
-          <li v-for="rule in rules" :key="rule.id"><span><b>{{ t('block') }}</b> {{ rule.subject_id ? `${rule.subject_id} ·` : '' }} {{ rule.method || '*' }} {{ rule.path_prefix || rule.client_ip }}</span><button class="remove" @click="removeRule(rule.id)">{{ t('remove') }}</button></li>
+          <li v-for="rule in rules" :key="rule.id"><span><b>{{ t('block') }}</b> {{ rule.subject_id ? `${rule.subject_id} ·` : '' }} {{ rule.method || '*' }} {{ rule.path_prefix || rule.client_ip }}</span><button class="remove" :disabled="!canOperate" @click="removeRule(rule.id)">{{ t('remove') }}</button></li>
         </ul>
         </article>
       </aside>

@@ -14,7 +14,8 @@ The repository now includes a Rust edge agent between OpenResty and the control 
 
 Read [the architecture](docs/architecture.md), [configuration](docs/configuration.md),
 [deployment guide](docs/deployment.md), [integration guide](docs/integration.md),
-and [performance contract](docs/performance-contract.md) before making data-path changes.
+[security baseline](docs/security.md), and [performance contract](docs/performance-contract.md)
+before making data-path changes.
 
 ## Adaptive visualization
 
@@ -63,9 +64,9 @@ to target a different upstream. The isolated E2E stack continues to use the
 bundled demo service.
 
 Use `compose.production.json` for the production-oriented single-node layout.
-It serves a prebuilt static console, keeps the Control API private, and adds
-health checks and restart policies. Authentication, TLS termination, and
-multi-node command routing are still deliberately deferred.
+It serves a prebuilt static console, keeps the Control API private, requires an
+administrator token, and adds health checks and restart policies. TLS
+termination, OIDC, and multi-node command routing are still deliberately deferred.
 
 ## Safety notes
 
