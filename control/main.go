@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -207,12 +208,19 @@ func (a *trafficSummaryAccumulator) take(windowEndMS int64) *TrafficSummary {
 type Store struct {
 	mu         sync.RWMutex
 	gateway    GatewayConfig
+	revision   uint64
+	revisions  []ConfigRevision
 	events     []TrafficEvent
 	eventStart int
 }
 
 func newStore() *Store {
-	return &Store{gateway: defaultGatewayConfig()}
+	config := defaultGatewayConfig()
+	return &Store{
+		gateway:   config,
+		revision:  1,
+		revisions: []ConfigRevision{{Revision: 1, CreatedAt: time.Now().UnixMilli(), Source: "defaults", Config: cloneGatewayConfig(config)}},
+	}
 }
 
 func (s *Store) addEvent(event TrafficEvent) {
@@ -688,17 +696,18 @@ func main() {
 		}
 		return openresty.putConfig(config)
 	}
-	applyGatewayConfig := func(config GatewayConfig) error {
-		if err := store.replaceConfig(config); err != nil {
-			return err
+	applyGatewayConfig := func(config GatewayConfig, source string) (uint64, error) {
+		revision, err := store.applyConfig(config, source)
+		if err != nil {
+			return 0, err
 		}
 		if err := persistStore(); err != nil {
-			return fmt.Errorf("persist configuration: %w", err)
+			return 0, fmt.Errorf("persist configuration: %w", err)
 		}
 		if err := syncGatewayConfig(); err != nil {
-			return fmt.Errorf("sync OpenResty: %w", err)
+			return 0, fmt.Errorf("sync OpenResty: %w", err)
 		}
-		return nil
+		return revision, nil
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -734,9 +743,15 @@ func main() {
 	})
 	r.Get("/api/ws", hub.serveWS)
 	r.Get("/api/bootstrap", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"config": store.config(), "events": store.recentEvents(500)})
+		writeJSON(w, http.StatusOK, map[string]any{"config": store.config(), "config_revision": store.configRevision(), "events": store.recentEvents(500)})
 	})
-	r.Get("/api/config", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, http.StatusOK, store.config()) })
+	r.Get("/api/config", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-HTTPV-Config-Revision", strconv.FormatUint(store.configRevision(), 10))
+		writeJSON(w, http.StatusOK, store.config())
+	})
+	r.Get("/api/config/revisions", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{"current": store.configRevision(), "revisions": store.revisionSummaries()})
+	})
 	r.Post("/api/config/validate", func(w http.ResponseWriter, r *http.Request) {
 		var config GatewayConfig
 		if err := decodeJSON(r, &config); err != nil {
@@ -756,11 +771,35 @@ func main() {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid configuration payload"})
 			return
 		}
-		if err := applyGatewayConfig(config); err != nil {
+		revision, err := applyGatewayConfig(config, "api")
+		if err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
+		w.Header().Set("X-HTTPV-Config-Revision", strconv.FormatUint(revision, 10))
 		writeJSON(w, http.StatusOK, store.config())
+	})
+	r.Post("/api/config/rollback/{revision}", func(w http.ResponseWriter, r *http.Request) {
+		target, err := strconv.ParseUint(chi.URLParam(r, "revision"), 10, 64)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid configuration revision"})
+			return
+		}
+		revision, err := store.rollbackConfig(target)
+		if err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+			return
+		}
+		if err := persistStore(); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "unable to persist rollback"})
+			return
+		}
+		if err := syncGatewayConfig(); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "OpenResty has not accepted the rollback"})
+			return
+		}
+		w.Header().Set("X-HTTPV-Config-Revision", strconv.FormatUint(revision, 10))
+		writeJSON(w, http.StatusOK, map[string]any{"revision": revision, "config": store.config()})
 	})
 	r.Get("/api/events", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, http.StatusOK, store.recentEvents(500)) })
 	r.Get("/api/policy-status", func(w http.ResponseWriter, r *http.Request) {
@@ -811,7 +850,7 @@ func main() {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "subject not found"})
 			return
 		}
-		if err := applyGatewayConfig(config); err != nil {
+		if _, err := applyGatewayConfig(config, "subject:"+subject.ID); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}

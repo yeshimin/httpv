@@ -318,3 +318,25 @@ func TestPersistedStateRecoversWhenInitialConfigIsMissing(t *testing.T) {
 		t.Fatalf("unexpected restored config: %#v", restored.config())
 	}
 }
+
+func TestConfigurationRevisionRollback(t *testing.T) {
+	store := newStore()
+	base := store.config()
+	changed := cloneGatewayConfig(base)
+	changed.Subjects[0].Name = "Changed"
+	changedRevision, err := store.applyConfig(changed, "test")
+	if err != nil || changedRevision != 2 {
+		t.Fatalf("apply revision = %d, %v", changedRevision, err)
+	}
+	rollbackRevision, err := store.rollbackConfig(1)
+	if err != nil || rollbackRevision != 3 {
+		t.Fatalf("rollback revision = %d, %v", rollbackRevision, err)
+	}
+	if store.config().Subjects[0].Name != base.Subjects[0].Name {
+		t.Fatalf("rollback did not restore base config: %#v", store.config())
+	}
+	history := store.revisionSummaries()
+	if len(history) != 3 || history[0].Revision != 3 || history[0].Source != "rollback:1" {
+		t.Fatalf("unexpected revision history: %#v", history)
+	}
+}

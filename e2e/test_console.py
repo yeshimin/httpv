@@ -66,6 +66,7 @@ class ConsoleE2E(unittest.TestCase):
         api("PUT", "/api/subjects/default", subject())
         self.page = self.browser.new_page(viewport={"width": 1440, "height": 900})
         self.page.goto(CONSOLE_URL, wait_until="networkidle")
+        expect(self.page.locator(".status.live")).to_be_visible(timeout=5_000)
 
     def tearDown(self):
         self.page.close()
@@ -123,6 +124,22 @@ class ConsoleE2E(unittest.TestCase):
         finally:
             api("PUT", "/api/config", original)
 
+    def test_config_revision_rollback(self):
+        _, raw = api("GET", "/api/config")
+        original = json.loads(raw)
+        _, revision_raw = api("GET", "/api/config/revisions")
+        original_revision = json.loads(revision_raw)["current"]
+        changed = json.loads(raw)
+        changed["subjects"][0]["name"] = "Changed by E2E"
+        api("PUT", "/api/config", changed)
+        _, changed_raw = api("GET", "/api/config/revisions")
+        changed_revision = json.loads(changed_raw)["current"]
+        self.assertGreater(changed_revision, original_revision)
+        _, rollback_raw = api("POST", f"/api/config/rollback/{original_revision}")
+        rollback = json.loads(rollback_raw)
+        self.assertGreater(rollback["revision"], changed_revision)
+        self.assertEqual(rollback["config"]["subjects"][0]["name"], original["subjects"][0]["name"])
+
     def test_timeout_block_completes_without_aggregation(self):
         api("PUT", "/api/subjects/default", subject(True, 100, "block"))
         self.page.reload(wait_until="networkidle")
@@ -133,13 +150,15 @@ class ConsoleE2E(unittest.TestCase):
     def test_manual_block_decision_completes(self):
         api("PUT", "/api/subjects/default", subject(True, 5_000, "block"))
         self.page.reload(wait_until="networkidle")
+        expect(self.page.locator(".status.live")).to_be_visible(timeout=5_000)
+        started_at = int(time.time() * 1000)
         api("POST", "/api/demo/burst", {"count": 1})
         deadline = time.time() + 5
         request_id = None
         while time.time() < deadline:
             _, raw = api("GET", "/api/events")
             for event in reversed(json.loads(raw)):
-                if event.get("phase") == "request_pending":
+                if event.get("phase") == "request_pending" and event.get("timestamp_ms", 0) >= started_at:
                     request_id = event["request_id"]
                     break
             if request_id:

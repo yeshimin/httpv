@@ -9,6 +9,21 @@ import (
 	"time"
 )
 
+const maxConfigRevisions = 20
+
+type ConfigRevision struct {
+	Revision  uint64        `json:"revision"`
+	CreatedAt int64         `json:"created_at"`
+	Source    string        `json:"source"`
+	Config    GatewayConfig `json:"config"`
+}
+
+type ConfigRevisionSummary struct {
+	Revision  uint64 `json:"revision"`
+	CreatedAt int64  `json:"created_at"`
+	Source    string `json:"source"`
+}
+
 func defaultGatewayConfig() GatewayConfig {
 	upstreamURL := strings.TrimSpace(os.Getenv("HTTPV_DEFAULT_UPSTREAM_URL"))
 	if upstreamURL == "" {
@@ -226,6 +241,64 @@ func (s *Store) replaceConfig(config GatewayConfig) error {
 	return nil
 }
 
+func (s *Store) appendRevisionLocked(source string) uint64 {
+	s.revision++
+	revision := ConfigRevision{Revision: s.revision, CreatedAt: time.Now().UnixMilli(), Source: source, Config: cloneGatewayConfig(s.gateway)}
+	s.revisions = append(s.revisions, revision)
+	if len(s.revisions) > maxConfigRevisions {
+		s.revisions = append([]ConfigRevision{}, s.revisions[len(s.revisions)-maxConfigRevisions:]...)
+	}
+	return s.revision
+}
+
+func (s *Store) resetRevisionHistory(source string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.revision = 1
+	s.revisions = []ConfigRevision{{Revision: 1, CreatedAt: time.Now().UnixMilli(), Source: source, Config: cloneGatewayConfig(s.gateway)}}
+}
+
+func (s *Store) applyConfig(config GatewayConfig, source string) (uint64, error) {
+	config = normalizeGatewayConfig(config)
+	if err := validateGatewayConfig(config); err != nil {
+		return 0, err
+	}
+	s.mu.Lock()
+	s.gateway = cloneGatewayConfig(config)
+	revision := s.appendRevisionLocked(source)
+	s.mu.Unlock()
+	return revision, nil
+}
+
+func (s *Store) configRevision() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.revision
+}
+
+func (s *Store) revisionSummaries() []ConfigRevisionSummary {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make([]ConfigRevisionSummary, 0, len(s.revisions))
+	for index := len(s.revisions) - 1; index >= 0; index-- {
+		revision := s.revisions[index]
+		result = append(result, ConfigRevisionSummary{Revision: revision.Revision, CreatedAt: revision.CreatedAt, Source: revision.Source})
+	}
+	return result
+}
+
+func (s *Store) rollbackConfig(revision uint64) (uint64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, candidate := range s.revisions {
+		if candidate.Revision == revision {
+			s.gateway = cloneGatewayConfig(candidate.Config)
+			return s.appendRevisionLocked(fmt.Sprintf("rollback:%d", revision)), nil
+		}
+	}
+	return 0, fmt.Errorf("configuration revision %d was not found", revision)
+}
+
 func (s *Store) updateSubject(subject Subject) Subject {
 	subject.Match = normalizeMatch(subject.Match)
 	if subject.Name == "" {
@@ -245,10 +318,12 @@ func (s *Store) updateSubject(subject Subject) Subject {
 	for index := range s.gateway.Subjects {
 		if s.gateway.Subjects[index].ID == subject.ID {
 			s.gateway.Subjects[index] = subject
+			s.appendRevisionLocked("subject:" + subject.ID)
 			return subject
 		}
 	}
 	s.gateway.Subjects = append(s.gateway.Subjects, subject)
+	s.appendRevisionLocked("subject:" + subject.ID)
 	return subject
 }
 
@@ -260,6 +335,7 @@ func (s *Store) addRule(rule Rule) Rule {
 	rule.Method = strings.ToUpper(strings.TrimSpace(rule.Method))
 	rule.CreatedAt = time.Now().UnixMilli()
 	s.gateway.Rules = append(s.gateway.Rules, rule)
+	s.appendRevisionLocked("rule:create")
 	return rule
 }
 
@@ -269,6 +345,7 @@ func (s *Store) removeRule(id string) bool {
 	for index := range s.gateway.Rules {
 		if s.gateway.Rules[index].ID == id {
 			s.gateway.Rules = append(s.gateway.Rules[:index], s.gateway.Rules[index+1:]...)
+			s.appendRevisionLocked("rule:delete")
 			return true
 		}
 	}

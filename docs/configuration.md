@@ -80,6 +80,25 @@ volume, published to the native policy snapshot, and synchronized to OpenResty.
 The runtime state takes precedence over the initial file after the first
 operator change or restart recovery.
 
+## Revisions and rollback
+
+HTTPV retains the most recent 20 complete configuration snapshots. List them:
+
+```sh
+curl -fsS http://127.0.0.1:5173/api/config/revisions
+```
+
+Roll back to a retained revision:
+
+```sh
+curl -fsS -X POST http://127.0.0.1:5173/api/config/rollback/3
+```
+
+Rollback is append-only: restoring revision 3 creates a new current revision
+instead of deleting later history. `GET /api/config`, configuration updates,
+and rollback responses expose the current value in the
+`X-HTTPV-Config-Revision` response header.
+
 ## Native policy compatibility
 
 The current native C policy snapshot accelerates a single managed subject and
