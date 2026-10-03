@@ -41,6 +41,7 @@ let app: Application | undefined
 let staticContainer: ParticleContainer | undefined
 let resizeObserver: ResizeObserver | undefined
 let selectionBox: Graphics | undefined
+let markerTexture: Texture | undefined
 let dragStart: Point | undefined
 let isDragging = false
 
@@ -75,9 +76,9 @@ function requestPoints(requestId: string, width: number, height: number) {
   const range = bottom - top
   const y = top + range * (0.04 + hashFraction(requestId, 'lane') * 0.92)
   return {
-    client: { x: width * 0.1, y },
-    gateway: { x: width * 0.48, y },
-    upstream: { x: width * 0.86, y }
+    client: { x: width * 0.05, y },
+    gateway: { x: width * 0.5, y },
+    upstream: { x: width * 0.95, y }
   }
 }
 
@@ -105,8 +106,8 @@ function updateStaticParticle(entry: StaticParticle, selected: boolean) {
   entry.particle.x = point.x
   entry.particle.y = point.y
   entry.particle.color = selected ? 0xf5fbff : colorFor(entry.record)
-  entry.particle.scaleX = selected ? 9 : 6
-  entry.particle.scaleY = selected ? 4 : 2
+  entry.particle.scaleX = selected ? 1.2 : 0.8
+  entry.particle.scaleY = selected ? 1.2 : 0.8
   entry.key = staticKey(entry.record, selected)
 }
 
@@ -114,13 +115,13 @@ function addStaticParticle(record: TrafficRecord, selected: boolean) {
   if (!staticContainer) return
   const point = staticPosition(record)
   const particle = new Particle({
-    texture: Texture.WHITE,
+    texture: markerTexture ?? Texture.WHITE,
     x: point.x,
     y: point.y,
     anchorX: 0.5,
     anchorY: 0.5,
-    scaleX: selected ? 9 : 6,
-    scaleY: selected ? 4 : 2,
+    scaleX: selected ? 1.2 : 0.8,
+    scaleY: selected ? 1.2 : 0.8,
     tint: selected ? 0xf5fbff : colorFor(record)
   })
   staticContainer.addParticle(particle)
@@ -272,9 +273,9 @@ function drawLane() {
   const height = app.renderer.height
   const top = 42
   const bottom = height - 30
-  const clientX = width * 0.1
-  const gatewayX = width * 0.48
-  const upstreamX = width * 0.86
+  const clientX = width * 0.05
+  const gatewayX = width * 0.5
+  const upstreamX = width * 0.95
   lane.rect(gatewayX - 36, top, 72, bottom - top).fill({ color: 0x75a7ff, alpha: 0.045 })
   lane.rect(gatewayX - 36, top, 72, bottom - top).stroke({ color: 0x5f87a8, width: 1, alpha: 0.72 })
   lane.moveTo(clientX, top).lineTo(clientX, bottom).stroke({ color: 0x5f87a8, width: 1, alpha: 0.6 })
@@ -376,36 +377,17 @@ function render() {
 
     const color = colorFor(record)
     particle.dot.clear()
-    const shimmer = (Math.sin(now / 95 + hashFraction(id, 'shimmer') * Math.PI * 2) + 1) / 2
+    particle.dot.moveTo(points.client.x - position.x, 0)
+    particle.dot.lineTo(points.gateway.x - position.x, 0)
+    particle.dot.lineTo(points.upstream.x - position.x, 0)
+    particle.dot.stroke({ color, width: 1, alpha: alpha * 0.14 })
     if (direction !== 0) {
       const behind = -direction
-      particle.dot.moveTo(behind * 34, 0).lineTo(behind * 8, 0).stroke({ color, width: 1, alpha: alpha * 0.18 })
-      particle.dot.moveTo(behind * 22, -1).lineTo(behind * 7, -1).stroke({ color, width: 1, alpha: alpha * (0.28 + shimmer * 0.16) })
-      particle.dot.moveTo(-8, 0).lineTo(-5, -3).lineTo(5, -3).lineTo(8, 0).lineTo(5, 3).lineTo(-5, 3).closePath().fill({ color, alpha: alpha * (0.1 + shimmer * 0.08) })
-      particle.dot.moveTo(-6, 0).lineTo(-4, -2).lineTo(4, -2).lineTo(6, 0).lineTo(4, 2).lineTo(-4, 2).closePath().fill({ color, alpha })
-      const glintX = -3 + shimmer * 6
-      particle.dot.rect(glintX, -1, 2, 2).fill({ color: 0xeaffff, alpha: alpha * 0.86 })
-    } else {
-      const scanY = -5 + shimmer * 10
-      particle.dot.rect(-6, -6, 12, 12).stroke({ color, width: 1, alpha: alpha * (0.24 + shimmer * 0.2) })
-      particle.dot.moveTo(-4, 0).lineTo(0, -4).lineTo(4, 0).lineTo(0, 4).closePath().fill({ color, alpha })
-      particle.dot.moveTo(-5, scanY).lineTo(5, scanY).stroke({ color: 0xeaffff, width: 1, alpha: alpha * 0.42 })
+      particle.dot.moveTo(behind * 30, 0).lineTo(behind * 4, 0).stroke({ color, width: 1.5, alpha: alpha * 0.48 })
     }
-    if (pulse > 0) {
-      const pulseSize = 8 + Math.sin(now / 140) * 1.5
-      particle.dot.moveTo(-pulseSize, -pulseSize + 4).lineTo(-pulseSize, -pulseSize).lineTo(-pulseSize + 4, -pulseSize)
-      particle.dot.moveTo(pulseSize - 4, -pulseSize).lineTo(pulseSize, -pulseSize).lineTo(pulseSize, -pulseSize + 4)
-      particle.dot.moveTo(pulseSize, pulseSize - 4).lineTo(pulseSize, pulseSize).lineTo(pulseSize - 4, pulseSize)
-      particle.dot.moveTo(-pulseSize + 4, pulseSize).lineTo(-pulseSize, pulseSize).lineTo(-pulseSize, pulseSize - 4)
-      particle.dot.stroke({ color, width: 1, alpha: alpha * 0.52 })
-    }
-    if (selectedIds.has(id)) {
-      particle.dot.moveTo(-10, -2).lineTo(-10, -6).lineTo(-6, -6)
-      particle.dot.moveTo(6, -6).lineTo(10, -6).lineTo(10, -2)
-      particle.dot.moveTo(10, 2).lineTo(10, 6).lineTo(6, 6)
-      particle.dot.moveTo(-6, 6).lineTo(-10, 6).lineTo(-10, 2)
-      particle.dot.stroke({ color: 0xf5fbff, width: 1.25, alpha: 0.95 })
-    }
+    const selected = selectedIds.has(id)
+    const pulseScale = pulse > 0 ? (Math.sin(now / 140) + 1) * 0.45 : 0
+    particle.dot.circle(0, 0, (selected ? 4.8 : 3.6) + pulseScale).fill({ color: selected ? 0xf5fbff : color, alpha })
     particle.dot.x = position.x
     particle.dot.y = position.y
     particle.dot.alpha = alpha
@@ -439,6 +421,9 @@ onMounted(async () => {
     resolution: Math.min(window.devicePixelRatio || 1, 1.5),
     autoDensity: true
   })
+  const marker = new Graphics().circle(4, 4, 4).fill(0xffffff)
+  markerTexture = app.renderer.generateTexture({ target: marker, frame: new Rectangle(0, 0, 8, 8), antialias: true })
+  marker.destroy()
   host.value.appendChild(app.canvas)
   host.value.addEventListener('pointerdown', onPointerDown)
   host.value.addEventListener('pointermove', onPointerMove)
@@ -462,6 +447,8 @@ onBeforeUnmount(() => {
   host.value?.removeEventListener('pointermove', onPointerMove)
   host.value?.removeEventListener('pointerup', onPointerUp)
   host.value?.removeEventListener('pointercancel', onPointerUp)
+  markerTexture?.destroy(true)
+  markerTexture = undefined
   app?.destroy(true, { children: true })
 })
 </script>
@@ -478,7 +465,7 @@ onBeforeUnmount(() => {
 .traffic-canvas { position: relative; width: 100%; height: 100%; min-height: 330px; overflow: hidden; }
 .traffic-canvas :deep(canvas) { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 0; }
 .lane-label { position: absolute; z-index: 1; top: 8px; transform: translateX(-50%); color: #9eb8ca; font-size: 10px; font-weight: 750; letter-spacing: .11em; text-transform: uppercase; pointer-events: none; }
-.label-client { left: 10%; }
-.label-gateway { left: 48%; }
-.label-upstream { left: 86%; }
+.label-client { left: 5%; }
+.label-gateway { left: 50%; }
+.label-upstream { left: 95%; }
 </style>
