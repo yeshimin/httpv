@@ -1,0 +1,100 @@
+{
+  "name": "httpv",
+  "services": {
+    "control": {
+      "build": "./control",
+      "image": "httpv-control:${HTTPV_VERSION:-local}",
+      "restart": "unless-stopped",
+      "environment": {
+        "HTTPV_OPENRESTY_ADMIN_URL": "http://openresty:8091",
+        "HTTPV_GATEWAY_URL": "http://openresty:8088",
+        "HTTPV_NATIVE_POLICY_PATH": "/run/httpv/policy.bin",
+        "HTTPV_CONTROL_STATE_PATH": "/run/httpv/control-state.json",
+        "HTTPV_CONFIG_PATH": "/etc/httpv/httpv.json",
+        "HTTPV_DEFAULT_UPSTREAM_URL": "${HTTPV_UPSTREAM_URL:-http://host.docker.internal:9998}",
+        "HTTPV_DEFAULT_UPSTREAM_HOST": "${HTTPV_UPSTREAM_HOST:-127.0.0.1:9998}"
+      },
+      "volumes": [
+        "httpv_runtime:/run/httpv",
+        "${HTTPV_CONFIG_FILE:-./config/httpv.json}:/etc/httpv/httpv.json:ro"
+      ],
+      "healthcheck": {
+        "test": ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8090/healthz"],
+        "interval": "10s",
+        "timeout": "3s",
+        "retries": 5
+      },
+      "security_opt": ["no-new-privileges:true"],
+      "networks": ["internal"]
+    },
+    "edge-agent": {
+      "build": "./edge-agent",
+      "image": "httpv-edge-agent:${HTTPV_VERSION:-local}",
+      "restart": "unless-stopped",
+      "environment": {
+        "HTTPV_AGENT_SOCKET_PATH": "/run/httpv/edge-agent.sock",
+        "HTTPV_AGENT_NATIVE_SOCKET_PATH": "/run/httpv/native.sock",
+        "HTTPV_AGENT_RING_DIRECTORY": "/run/httpv",
+        "HTTPV_AGENT_NATIVE_SOCKET_BUFFER_BYTES": "8388608",
+        "HTTPV_AGENT_CONTROL_ADDR": "control:9100",
+        "HTTPV_AGENT_METRICS_ADDR": "0.0.0.0:9102",
+        "HTTPV_AGENT_QUEUE_CAPACITY": "65536",
+        "HTTPV_AGENT_FORWARD_WORKERS": "4"
+      },
+      "volumes": ["httpv_runtime:/run/httpv"],
+      "depends_on": {
+        "control": {"condition": "service_healthy"}
+      },
+      "ports": ["127.0.0.1:${HTTPV_EDGE_METRICS_PORT:-9102}:9102"],
+      "security_opt": ["no-new-privileges:true"],
+      "networks": ["internal"]
+    },
+    "openresty": {
+      "build": {"context": ".", "dockerfile": "openresty/Dockerfile"},
+      "image": "httpv-openresty:${HTTPV_VERSION:-local}",
+      "restart": "unless-stopped",
+      "environment": {
+        "HTTPV_UPSTREAM_URL": "${HTTPV_UPSTREAM_URL:-http://host.docker.internal:9998}",
+        "HTTPV_UPSTREAM_HOST": "${HTTPV_UPSTREAM_HOST:-127.0.0.1:9998}"
+      },
+      "ports": ["${HTTPV_GATEWAY_BIND:-0.0.0.0}:${HTTPV_GATEWAY_PORT:-8088}:8088"],
+      "extra_hosts": ["host.docker.internal:host-gateway"],
+      "volumes": ["httpv_runtime:/run/httpv"],
+      "depends_on": {
+        "control": {"condition": "service_healthy"},
+        "edge-agent": {"condition": "service_started"}
+      },
+      "healthcheck": {
+        "test": ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8091/internal/metrics"],
+        "interval": "10s",
+        "timeout": "3s",
+        "retries": 5
+      },
+      "security_opt": ["no-new-privileges:true"],
+      "networks": ["internal"]
+    },
+    "web": {
+      "build": "./web",
+      "image": "httpv-web:${HTTPV_VERSION:-local}",
+      "restart": "unless-stopped",
+      "ports": ["${HTTPV_CONSOLE_BIND:-127.0.0.1}:${HTTPV_CONSOLE_PORT:-5173}:80"],
+      "depends_on": {
+        "control": {"condition": "service_healthy"}
+      },
+      "healthcheck": {
+        "test": ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"],
+        "interval": "10s",
+        "timeout": "3s",
+        "retries": 5
+      },
+      "security_opt": ["no-new-privileges:true"],
+      "networks": ["internal"]
+    }
+  },
+  "networks": {
+    "internal": {"driver": "bridge"}
+  },
+  "volumes": {
+    "httpv_runtime": {}
+  }
+}

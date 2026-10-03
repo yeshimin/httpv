@@ -5,7 +5,9 @@ import TrafficCanvas, { type TrafficRecord } from './TrafficCanvas.vue'
 type Match = { host: string; path_prefix: string; method: string }
 type Gate = { enabled: boolean; timeout_ms: number; timeout_action: 'allow' | 'block' }
 type Subject = { id: string; name: string; enabled: boolean; display: boolean; match: Match; gate: Gate }
-type Rule = { id: string; action: string; path_prefix: string; method: string; client_ip: string; created_at: number }
+type Upstream = { id: string; name: string; url: string; host_header: string }
+type Route = { id: string; name: string; enabled: boolean; match: Match; upstream_id: string }
+type Rule = { id: string; subject_id?: string; action: string; path_prefix: string; method: string; client_ip: string; created_at: number }
 type EventMessage = {
   phase: string; request_id: string; subject_id: string; timestamp_ms: number; method?: string; path?: string; client_ip?: string;
   status?: number; duration_ms?: number; request_bytes?: number; response_bytes?: number; action?: string
@@ -15,7 +17,7 @@ type TrafficSummary = {
   type: 'traffic_summary'; window_start_ms: number; window_end_ms: number; total: number; started: number; responded: number;
   finished: number; pending: number; blocked: number; paths: TrafficSummaryPath[]
 }
-type NativePolicyStatus = { version: number; state: 'active' | 'pending' | 'unpublished' | 'disabled'; acks: { worker: string; version: number }[] }
+type NativePolicyStatus = { version: number; state: 'active' | 'pending' | 'unpublished' | 'disabled'; mode?: 'native' | 'lua_fallback' | 'disabled'; acks: { worker: string; version: number }[] }
 
 type Locale = 'zh' | 'en'
 const messages: Record<Locale, Record<string, string>> = {
@@ -39,11 +41,11 @@ const messages: Record<Locale, Record<string, string>> = {
     selectedPending: '其中 {count} 条仍待人工决定', batchHistory: '这些请求已经结束；只能为后续同类流量创建规则。', allowSelected: '放行选中待决请求', blockSelected: '阻断选中待决请求', blockSelectedFuture: '阻断选中路径的后续流量',
     burst: '并发 20 条', emergencyBlock: '紧急阻断全部待决', rendering: '绘制 {shown}/{total}',
     overloadMode: '高流量聚合', overloadSummary: '已聚合 {total} 个普通事件 · {rate}/秒', overloadHint: '待决和阻断请求仍逐条展示、可直接操作。', blockFlow: '阻断此流量',
-    policyActive: '策略 C v{version} 已生效', policyPending: '策略 C v{version} 同步中', policyDisabled: '策略 C 未启用',
+    policyActive: '策略 C v{version} 已生效', policyFallback: '策略 v{version} 已同步 · Lua 兼容路径', policyPending: '策略 C v{version} 同步中', policyDisabled: '策略 C 未启用',
     activeFlows: '活跃', rate: '速率', p95: 'P95', overview: '概览', headers: 'Header', body: 'Body',
     requestId: '请求 ID', subject: '监管对象', requestSize: '请求大小', started: '开始时间', finished: '完成时间',
     requestHeaders: '请求 Header', responseHeaders: '响应 Header', requestBody: '请求 Body', responseBody: '响应 Body',
-    captureOff: '内容采集尚未开启。后续将按规则限长、脱敏并默认关闭。'
+    captureOff: '内容采集尚未开启。后续将按规则限长、脱敏并默认关闭。', managedSubject: '监管对象', topology: '{routes} 条路由 · {upstreams} 个上游'
   },
   en: {
     commandSurface: 'Traffic command surface', connecting: 'connecting', live: 'live', closed: 'closed',
@@ -65,19 +67,22 @@ const messages: Record<Locale, Record<string, string>> = {
     selectedPending: '{count} still waiting for a decision', batchHistory: 'These requests have completed; only future-match rules can be created.', allowSelected: 'Allow selected pending', blockSelected: 'Block selected pending', blockSelectedFuture: 'Block future traffic for selected paths',
     burst: 'Burst ×20', emergencyBlock: 'Emergency block all waiting', rendering: 'rendering {shown}/{total}',
     overloadMode: 'High-traffic aggregation', overloadSummary: '{total} ordinary events aggregated · {rate}/s', overloadHint: 'Waiting and blocked requests remain individually visible and actionable.', blockFlow: 'Block this flow',
-    policyActive: 'Policy C v{version} active', policyPending: 'Policy C v{version} syncing', policyDisabled: 'Policy C disabled',
+    policyActive: 'Policy C v{version} active', policyFallback: 'Policy v{version} synced · Lua compatibility path', policyPending: 'Policy C v{version} syncing', policyDisabled: 'Policy C disabled',
     activeFlows: 'active', rate: 'rate', p95: 'P95', overview: 'Overview', headers: 'Headers', body: 'Body',
     requestId: 'Request ID', subject: 'Subject', requestSize: 'Request size', started: 'Started', finished: 'Finished',
     requestHeaders: 'Request headers', responseHeaders: 'Response headers', requestBody: 'Request body', responseBody: 'Response body',
-    captureOff: 'Content capture is not enabled. It will be opt-in, size-limited, and redacted.'
+    captureOff: 'Content capture is not enabled. It will be opt-in, size-limited, and redacted.', managedSubject: 'Managed subject', topology: '{routes} routes · {upstreams} upstreams'
   }
 }
 
 const subject = ref<Subject>({
-  id: 'demo-api', name: 'Demo API', enabled: true, display: true,
+  id: 'default', name: 'Default traffic', enabled: true, display: true,
   match: { host: '', path_prefix: '/', method: '' },
   gate: { enabled: false, timeout_ms: 30000, timeout_action: 'block' }
 })
+const subjects = ref<Subject[]>([])
+const upstreams = ref<Upstream[]>([])
+const routes = ref<Route[]>([])
 const rules = ref<Rule[]>([])
 const traffic = ref(new Map<string, TrafficRecord>())
 const selectedID = ref<string>()
@@ -109,6 +114,11 @@ function setLocale(next: Locale) {
 
 function onLocaleChange(event: Event) {
   setLocale((event.target as HTMLSelectElement).value as Locale)
+}
+
+function onSubjectChange(event: Event) {
+  const next = subjects.value.find((candidate) => candidate.id === (event.target as HTMLSelectElement).value)
+  if (next) subject.value = structuredClone(next)
 }
 
 const records = computed(() => Array.from(traffic.value.values()).sort((a, b) => a.startedAt - b.startedAt))
@@ -162,6 +172,7 @@ const selectedPendingLabel = computed(() => {
 const latestRecord = computed(() => records.value.at(-1))
 const overloadActive = computed(() => Boolean(overloadSummary.value && nowMs.value - overloadSummary.value.window_end_ms < 1_500))
 const policyLabel = computed(() => {
+  if (policyStatus.value.state === 'active' && policyStatus.value.mode === 'lua_fallback') return t('policyFallback', { version: policyStatus.value.version })
   if (policyStatus.value.state === 'active') return t('policyActive', { version: policyStatus.value.version })
   if (policyStatus.value.state === 'pending') return t('policyPending', { version: policyStatus.value.version })
   return t('policyDisabled')
@@ -273,7 +284,11 @@ async function bootstrap() {
   const response = await fetch('/api/bootstrap')
   if (!response.ok) throw new Error('Unable to load control state')
   const data = await response.json()
-  subject.value = data.config.subjects[0]
+  subjects.value = data.config.subjects
+  upstreams.value = data.config.upstreams
+  routes.value = data.config.routes
+  const current = subjects.value.find((candidate) => candidate.id === subject.value.id) ?? subjects.value[0]
+  if (current) subject.value = structuredClone(current)
   rules.value = data.config.rules
   const next = new Map<string, TrafficRecord>()
   for (const event of data.events as EventMessage[]) applyEventToMap(event, next)
@@ -312,10 +327,13 @@ function connect() {
 }
 
 async function saveSubject() {
-  const response = await fetch('/api/subjects/demo-api', {
+  const response = await fetch(`/api/subjects/${encodeURIComponent(subject.value.id)}`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(subject.value)
   })
-  if (!response.ok) alert('OpenResty has not accepted the configuration yet.')
+  if (!response.ok) { alert('OpenResty has not accepted the configuration yet.'); return }
+  const applied = await response.json() as Subject
+  subject.value = applied
+  subjects.value = subjects.value.map((candidate) => candidate.id === applied.id ? applied : candidate)
 }
 
 async function toggleGate() {
@@ -370,7 +388,7 @@ async function blockSelectedPaths() {
   const created = await Promise.all([...unique.values()].map(async (record) => {
     const response = await fetch('/api/rules', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'block', path_prefix: record.path, method: record.method, client_ip: '' })
+      body: JSON.stringify({ subject_id: record.subjectId, action: 'block', path_prefix: record.path, method: record.method, client_ip: '' })
     })
     return response.ok ? response.json() as Promise<Rule> : undefined
   }))
@@ -381,7 +399,7 @@ async function blockPath() {
   if (!selected.value) return
   const response = await fetch('/api/rules', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action: 'block', path_prefix: selected.value.path, method: selected.value.method, client_ip: '' })
+    body: JSON.stringify({ subject_id: selected.value.subjectId, action: 'block', path_prefix: selected.value.path, method: selected.value.method, client_ip: '' })
   })
   if (!response.ok) { alert('Unable to create the block rule.'); return }
   rules.value.push(await response.json())
@@ -391,7 +409,7 @@ async function blockAggregatePath(path: TrafficSummaryPath) {
   if (!path.path || path.path === 'other') return
   const response = await fetch('/api/rules', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action: 'block', path_prefix: path.path, method: path.method, client_ip: '' })
+    body: JSON.stringify({ subject_id: path.subject_id, action: 'block', path_prefix: path.path, method: path.method, client_ip: '' })
   })
   if (!response.ok) { alert('Unable to create the block rule.'); return }
   rules.value.push(await response.json())
@@ -496,7 +514,10 @@ onBeforeUnmount(() => {
 
       <aside class="command-rail">
         <article class="panel operating-panel">
-          <h2>{{ t('trafficControls') }}</h2>
+          <div class="panel-title controls-title">
+            <div><h2>{{ t('trafficControls') }}</h2><small>{{ t('topology', { routes: routes.length, upstreams: upstreams.length }) }}</small></div>
+            <label class="subject-picker"><span>{{ t('managedSubject') }}</span><select :value="subject.id" @change="onSubjectChange"><option v-for="candidate in subjects" :key="candidate.id" :value="candidate.id">{{ candidate.name }}</option></select></label>
+          </div>
           <div class="field-row">
             <label><span>{{ t('managedPath') }}</span><input v-model="subject.match.path_prefix" @change="saveSubject" /></label>
             <label><span>{{ t('gateTimeout') }}</span><input v-model.number="subject.gate.timeout_ms" min="0" step="1000" type="number" @change="saveSubject" /></label>
@@ -558,7 +579,7 @@ onBeforeUnmount(() => {
           <h2>{{ t('activeRules') }}</h2>
           <p v-if="rules.length === 0" class="hint">{{ t('noRules') }}</p>
         <ul v-else>
-          <li v-for="rule in rules" :key="rule.id"><span><b>{{ t('block') }}</b> {{ rule.method || '*' }} {{ rule.path_prefix || rule.client_ip }}</span><button class="remove" @click="removeRule(rule.id)">{{ t('remove') }}</button></li>
+          <li v-for="rule in rules" :key="rule.id"><span><b>{{ t('block') }}</b> {{ rule.subject_id ? `${rule.subject_id} ·` : '' }} {{ rule.method || '*' }} {{ rule.path_prefix || rule.client_ip }}</span><button class="remove" @click="removeRule(rule.id)">{{ t('remove') }}</button></li>
         </ul>
         </article>
       </aside>

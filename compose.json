@@ -7,10 +7,13 @@
         "HTTPV_OPENRESTY_ADMIN_URL": "http://openresty:8091",
         "HTTPV_GATEWAY_URL": "http://openresty:8088",
         "HTTPV_NATIVE_POLICY_PATH": "/run/httpv/policy.bin",
-        "HTTPV_CONTROL_STATE_PATH": "/run/httpv/control-state.json"
+        "HTTPV_CONTROL_STATE_PATH": "/run/httpv/control-state.json",
+        "HTTPV_CONFIG_PATH": "/etc/httpv/httpv.json",
+        "HTTPV_DEFAULT_UPSTREAM_URL": "http://host.docker.internal:9998",
+        "HTTPV_DEFAULT_UPSTREAM_HOST": "127.0.0.1:9998"
       },
       "ports": ["8090:8090"],
-      "volumes": ["httpv_runtime:/run/httpv"],
+      "volumes": ["httpv_runtime:/run/httpv", "./config/httpv.json:/etc/httpv/httpv.json:ro"],
       "networks": ["internal"]
     },
     "openresty": {
@@ -48,7 +51,7 @@
     },
     "web": {
       "build": "./web",
-      "ports": ["5173:5173"],
+      "ports": ["5173:80"],
       "depends_on": ["control"],
       "networks": ["internal"]
     }

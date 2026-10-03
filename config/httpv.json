@@ -1,0 +1,42 @@
+{
+  "upstreams": [
+    {
+      "id": "local-app",
+      "name": "Local application",
+      "url": "http://host.docker.internal:9998",
+      "host_header": "127.0.0.1:9998"
+    }
+  ],
+  "routes": [
+    {
+      "id": "default-route",
+      "name": "Default route",
+      "enabled": true,
+      "match": {
+        "host": "",
+        "path_prefix": "/",
+        "method": ""
+      },
+      "upstream_id": "local-app"
+    }
+  ],
+  "subjects": [
+    {
+      "id": "default",
+      "name": "Default traffic",
+      "enabled": true,
+      "display": true,
+      "match": {
+        "host": "",
+        "path_prefix": "/",
+        "method": ""
+      },
+      "gate": {
+        "enabled": false,
+        "timeout_ms": 30000,
+        "timeout_action": "block"
+      }
+    }
+  ],
+  "rules": []
+}

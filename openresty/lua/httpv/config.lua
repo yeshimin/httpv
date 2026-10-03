@@ -2,11 +2,20 @@ local cjson = require "cjson.safe"
 
 local _M = {}
 
+local default_upstream_url = os.getenv("HTTPV_UPSTREAM_URL") or "http://demo:9000"
+local default_upstream_host = os.getenv("HTTPV_UPSTREAM_HOST") or "demo:9000"
+
 local default_config = {
+  upstreams = {
+    { id = "local-app", name = "Local application", url = default_upstream_url, host_header = default_upstream_host }
+  },
+  routes = {
+    { id = "default-route", name = "Default route", enabled = true, match = { path_prefix = "/" }, upstream_id = "local-app" }
+  },
   subjects = {
     {
-      id = "demo-api",
-      name = "Demo API",
+      id = "default",
+      name = "Default traffic",
       enabled = true,
       display = true,
       match = { path_prefix = "/" },
@@ -32,7 +41,11 @@ function _M.get()
 end
 
 function _M.put(config)
-  if type(config) ~= "table" or type(config.subjects) ~= "table" or type(config.rules) ~= "table" then
+  if type(config) ~= "table"
+    or type(config.upstreams) ~= "table"
+    or type(config.routes) ~= "table"
+    or type(config.subjects) ~= "table"
+    or type(config.rules) ~= "table" then
     return nil, "invalid configuration"
   end
   local encoded = cjson.encode(config)

@@ -28,6 +28,7 @@ type NativePolicyPublisher struct {
 	mu          sync.Mutex
 	version     uint64
 	fingerprint string
+	mode        string
 }
 
 type NativePolicyAck struct {
@@ -38,6 +39,7 @@ type NativePolicyAck struct {
 type NativePolicyStatus struct {
 	Version uint64            `json:"version"`
 	State   string            `json:"state"`
+	Mode    string            `json:"mode"`
 	Acks    []NativePolicyAck `json:"acks"`
 }
 
@@ -65,18 +67,33 @@ func appendNativePolicyText(buffer []byte, value string) ([]byte, error) {
 	return append(buffer, value...), nil
 }
 
+func clearNativePolicyAcks(path string) {
+	directory := filepath.Dir(path)
+	prefix := filepath.Base(path) + ".ack."
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasPrefix(entry.Name(), prefix) {
+			_ = os.Remove(filepath.Join(directory, entry.Name()))
+		}
+	}
+}
+
 func encodeNativePolicy(config GatewayConfig) ([]byte, error) {
 	return encodeNativePolicyVersion(config, 1)
 }
 
 func encodeNativePolicyVersion(config GatewayConfig, version uint64) ([]byte, error) {
 	var subject Subject
-	if len(config.Subjects) > 0 {
+	nativeCompatible := len(config.Subjects) == 1
+	if nativeCompatible {
 		subject = config.Subjects[0]
 	}
 	rules := make([]Rule, 0, nativePolicyMaxRules)
 	for _, rule := range config.Rules {
-		if rule.Action == "block" && len(rules) < nativePolicyMaxRules {
+		if nativeCompatible && rule.Action == "block" && (rule.SubjectID == "" || rule.SubjectID == subject.ID) && len(rules) < nativePolicyMaxRules {
 			rules = append(rules, rule)
 		}
 	}
@@ -136,6 +153,7 @@ func (p *NativePolicyPublisher) publish(config GatewayConfig) (uint64, error) {
 	if err := os.WriteFile(temporary, buffer, 0o644); err != nil {
 		return 0, err
 	}
+	clearNativePolicyAcks(p.path)
 	if err := os.Rename(temporary, p.path); err != nil {
 		_ = os.Remove(temporary)
 		return 0, err
@@ -150,18 +168,23 @@ func (p *NativePolicyPublisher) publish(config GatewayConfig) (uint64, error) {
 	}
 	p.version = nextVersion
 	p.fingerprint = string(fingerprint)
+	p.mode = "native"
+	if len(config.Subjects) != 1 || (len(config.Subjects) == 1 && config.Subjects[0].Gate.Enabled) {
+		p.mode = "lua_fallback"
+	}
 	return p.version, nil
 }
 
 func (p *NativePolicyPublisher) status() NativePolicyStatus {
 	if p == nil || p.path == "" {
-		return NativePolicyStatus{State: "disabled"}
+		return NativePolicyStatus{State: "disabled", Mode: "disabled"}
 	}
 	p.mu.Lock()
 	version := p.version
 	path := p.path
+	mode := p.mode
 	p.mu.Unlock()
-	status := NativePolicyStatus{Version: version, State: "unpublished"}
+	status := NativePolicyStatus{Version: version, State: "unpublished", Mode: mode}
 	if version == 0 {
 		return status
 	}

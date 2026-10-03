@@ -43,8 +43,29 @@ local function match_subject(gateway, method, host, path)
   return nil
 end
 
-local function matches_rule(rule, method, path, client_ip)
+local function match_route(gateway, method, host, path)
+  for _, route in ipairs(gateway.routes or {}) do
+    if matches(route, method, host, path) then
+      return route
+    end
+  end
+  return nil
+end
+
+local function find_upstream(gateway, upstream_id)
+  for _, upstream in ipairs(gateway.upstreams or {}) do
+    if upstream.id == upstream_id then
+      return upstream
+    end
+  end
+  return nil
+end
+
+local function matches_rule(rule, subject_id, method, path, client_ip)
   if rule.action ~= "block" then
+    return false
+  end
+  if rule.subject_id and rule.subject_id ~= "" and rule.subject_id ~= subject_id then
     return false
   end
   if rule.method and rule.method ~= "" and rule.method ~= method then
@@ -153,7 +174,16 @@ function _M.access()
   local path = ngx.var.uri
   local host = ngx.var.host or ""
   local client_ip = ngx.var.remote_addr or ""
-  local subject = match_subject(config.get(), method, host, path)
+  local gateway = config.get()
+  local route = match_route(gateway, method, host, path)
+  if route then
+    local upstream = find_upstream(gateway, route.upstream_id)
+    if upstream then
+      ngx.var.httpv_upstream_url = upstream.url
+      ngx.var.httpv_upstream_host = upstream.host_header or ""
+    end
+  end
+  local subject = match_subject(gateway, method, host, path)
   if not subject then
     return
   end
@@ -176,9 +206,8 @@ function _M.access()
   metrics.increment("managed_requests_total")
   emit(ctx, "request_started")
 
-  local gateway = config.get()
   for _, rule in ipairs(gateway.rules or {}) do
-    if matches_rule(rule, method, path, client_ip) then
+    if matches_rule(rule, subject.id, method, path, client_ip) then
       metrics.increment("blocked_requests_total")
       emit(ctx, "request_blocked", { action = "block", status = ngx.HTTP_FORBIDDEN })
       ngx.exit(ngx.HTTP_FORBIDDEN)

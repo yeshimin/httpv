@@ -10,5 +10,6 @@ python e2e/test_console.py
 docker compose -f compose.e2e.json down -v
 ```
 
-The suite checks canvas layout, timeout-block completion, and overload
+The suite checks canvas layout, native policy activation, configuration
+validation, hot route selection, timeout and manual blocking, and overload
 aggregation. The isolated console uses `http://127.0.0.1:15173`.

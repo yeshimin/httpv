@@ -48,8 +48,24 @@ type Subject struct {
 	Gate    Gate   `json:"gate"`
 }
 
+type Upstream struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	URL        string `json:"url"`
+	HostHeader string `json:"host_header"`
+}
+
+type Route struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Enabled    bool   `json:"enabled"`
+	Match      Match  `json:"match"`
+	UpstreamID string `json:"upstream_id"`
+}
+
 type Rule struct {
 	ID         string `json:"id"`
+	SubjectID  string `json:"subject_id,omitempty"`
 	Action     string `json:"action"`
 	PathPrefix string `json:"path_prefix"`
 	Method     string `json:"method"`
@@ -58,8 +74,10 @@ type Rule struct {
 }
 
 type GatewayConfig struct {
-	Subjects []Subject `json:"subjects"`
-	Rules    []Rule    `json:"rules"`
+	Upstreams []Upstream `json:"upstreams"`
+	Routes    []Route    `json:"routes"`
+	Subjects  []Subject  `json:"subjects"`
+	Rules     []Rule     `json:"rules"`
 }
 
 type TrafficEvent struct {
@@ -181,72 +199,13 @@ func (a *trafficSummaryAccumulator) take(windowEndMS int64) *TrafficSummary {
 
 type Store struct {
 	mu         sync.RWMutex
-	subject    Subject
-	rules      map[string]Rule
+	gateway    GatewayConfig
 	events     []TrafficEvent
 	eventStart int
 }
 
 func newStore() *Store {
-	return &Store{
-		subject: Subject{
-			ID:      "demo-api",
-			Name:    "Demo API",
-			Enabled: true,
-			Display: true,
-			Match:   Match{PathPrefix: "/"},
-			Gate:    Gate{Enabled: false, TimeoutMS: 30_000, TimeoutAction: "block"},
-		},
-		rules: map[string]Rule{},
-	}
-}
-
-func (s *Store) config() GatewayConfig {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	rules := make([]Rule, 0, len(s.rules))
-	for _, rule := range s.rules {
-		rules = append(rules, rule)
-	}
-	sort.Slice(rules, func(i, j int) bool { return rules[i].CreatedAt < rules[j].CreatedAt })
-	return GatewayConfig{Subjects: []Subject{s.subject}, Rules: rules}
-}
-
-func (s *Store) updateSubject(subject Subject) Subject {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	subject.ID = "demo-api"
-	if subject.Name == "" {
-		subject.Name = "Demo API"
-	}
-	if subject.Match.PathPrefix == "" {
-		subject.Match.PathPrefix = "/"
-	}
-	if subject.Gate.TimeoutAction != "allow" && subject.Gate.TimeoutAction != "block" {
-		subject.Gate.TimeoutAction = "block"
-	}
-	s.subject = subject
-	return s.subject
-}
-
-func (s *Store) addRule(rule Rule) Rule {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	rule.ID = "rule-" + time.Now().UTC().Format("20060102T150405.000000000")
-	rule.Action = "block"
-	rule.CreatedAt = time.Now().UnixMilli()
-	s.rules[rule.ID] = rule
-	return rule
-}
-
-func (s *Store) removeRule(id string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.rules[id]; !ok {
-		return false
-	}
-	delete(s.rules, id)
-	return true
+	return &Store{gateway: defaultGatewayConfig()}
 }
 
 func (s *Store) addEvent(event TrafficEvent) {
@@ -695,7 +654,8 @@ func serveUDP(ctx context.Context, store *Store, hub *Hub) {
 
 func main() {
 	statePath := os.Getenv("HTTPV_CONTROL_STATE_PATH")
-	store, err := loadStore(statePath)
+	configPath := os.Getenv("HTTPV_CONFIG_PATH")
+	store, err := loadStore(statePath, configPath)
 	if err != nil {
 		log.Printf("control state unavailable; using defaults: %v", err)
 		store = newStore()
@@ -718,6 +678,18 @@ func main() {
 			return fmt.Errorf("publish native policy: %w", err)
 		}
 		return openresty.putConfig(config)
+	}
+	applyGatewayConfig := func(config GatewayConfig) error {
+		if err := store.replaceConfig(config); err != nil {
+			return err
+		}
+		if err := persistStore(); err != nil {
+			return fmt.Errorf("persist configuration: %w", err)
+		}
+		if err := syncGatewayConfig(); err != nil {
+			return fmt.Errorf("sync OpenResty: %w", err)
+		}
+		return nil
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -755,6 +727,32 @@ func main() {
 	r.Get("/api/bootstrap", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"config": store.config(), "events": store.recentEvents(500)})
 	})
+	r.Get("/api/config", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, http.StatusOK, store.config()) })
+	r.Post("/api/config/validate", func(w http.ResponseWriter, r *http.Request) {
+		var config GatewayConfig
+		if err := decodeJSON(r, &config); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid configuration payload"})
+			return
+		}
+		config = normalizeGatewayConfig(config)
+		if err := validateGatewayConfig(config); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"status": "valid", "config": config})
+	})
+	r.Put("/api/config", func(w http.ResponseWriter, r *http.Request) {
+		var config GatewayConfig
+		if err := decodeJSON(r, &config); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid configuration payload"})
+			return
+		}
+		if err := applyGatewayConfig(config); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, store.config())
+	})
 	r.Get("/api/events", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, http.StatusOK, store.recentEvents(500)) })
 	r.Get("/api/policy-status", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, nativePolicy.status())
@@ -784,20 +782,35 @@ func main() {
 		}
 		writeJSON(w, http.StatusAccepted, map[string]int{"accepted": payload.Count})
 	})
-	r.Put("/api/subjects/demo-api", func(w http.ResponseWriter, r *http.Request) {
+	r.Put("/api/subjects/{id}", func(w http.ResponseWriter, r *http.Request) {
 		var subject Subject
 		if err := decodeJSON(r, &subject); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid subject payload"})
 			return
 		}
-		subject = store.updateSubject(subject)
-		if err := persistStore(); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "unable to persist configuration"})
+		subject.ID = chi.URLParam(r, "id")
+		config := store.config()
+		found := false
+		for index := range config.Subjects {
+			if config.Subjects[index].ID == subject.ID {
+				config.Subjects[index] = subject
+				found = true
+				break
+			}
+		}
+		if !found {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "subject not found"})
 			return
 		}
-		if err := syncGatewayConfig(); err != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "OpenResty has not accepted the configuration"})
+		if err := applyGatewayConfig(config); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
+		}
+		for _, candidate := range store.config().Subjects {
+			if candidate.ID == chi.URLParam(r, "id") {
+				subject = candidate
+				break
+			}
 		}
 		writeJSON(w, http.StatusOK, subject)
 	})
@@ -810,6 +823,19 @@ func main() {
 		if rule.PathPrefix == "" && rule.ClientIP == "" {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "a path prefix or client IP is required"})
 			return
+		}
+		if rule.SubjectID != "" {
+			found := false
+			for _, subject := range store.config().Subjects {
+				if subject.ID == rule.SubjectID {
+					found = true
+					break
+				}
+			}
+			if !found {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "subject not found"})
+				return
+			}
 		}
 		rule = store.addRule(rule)
 		if err := persistStore(); err != nil {

@@ -1,6 +1,6 @@
 # HTTPV
 
-HTTPV is a local prototype for real-time, per-request HTTP traffic visualization and control.
+HTTPV is a single-node preview for real-time, per-request HTTP traffic visualization and control.
 
 The prototype keeps enforcement inside OpenResty. The Go control service and browser UI never sit on the request forwarding path.
 
@@ -12,7 +12,9 @@ HTTPV is licensed under [Apache-2.0](LICENSE).
 
 The repository now includes a Rust edge agent between OpenResty and the control service. It owns a bounded telemetry queue and publishes received, forwarded, dropped, and forwarding-error counters at `:9102` inside the container network. This is the first migration step away from an OpenResty worker directly serving observability consumers.
 
-Read [the architecture](docs/architecture.md) and [the performance contract](docs/performance-contract.md) before making data-path changes.
+Read [the architecture](docs/architecture.md), [configuration](docs/configuration.md),
+[deployment guide](docs/deployment.md), [integration guide](docs/integration.md),
+and [performance contract](docs/performance-contract.md) before making data-path changes.
 
 ## Adaptive visualization
 
@@ -59,6 +61,11 @@ host gateway. The console's **Send current request** and burst controls send
 delay. Change `HTTPV_UPSTREAM_URL` and `HTTPV_UPSTREAM_HOST` in `compose.json`
 to target a different upstream. The isolated E2E stack continues to use the
 bundled demo service.
+
+Use `compose.production.json` for the production-oriented single-node layout.
+It serves a prebuilt static console, keeps the Control API private, and adds
+health checks and restart policies. Authentication, TLS termination, and
+multi-node command routing are still deliberately deferred.
 
 ## Safety notes
 

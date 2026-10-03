@@ -8,18 +8,35 @@ import (
 )
 
 type persistedControlState struct {
+	Version int           `json:"version,omitempty"`
+	Config  GatewayConfig `json:"config,omitempty"`
+	// Subject and Rules keep backward compatibility with pre-product state files.
 	Subject Subject `json:"subject"`
 	Rules   []Rule  `json:"rules"`
 }
 
-func loadStore(path string) (*Store, error) {
+func loadStore(path string, configPaths ...string) (*Store, error) {
 	store := newStore()
+	var configErr error
+	if len(configPaths) > 0 && configPaths[0] != "" {
+		data, err := os.ReadFile(configPaths[0])
+		if err != nil {
+			configErr = fmt.Errorf("read gateway config: %w", err)
+		} else {
+			var config GatewayConfig
+			if err := json.Unmarshal(data, &config); err != nil {
+				configErr = fmt.Errorf("decode gateway config: %w", err)
+			} else if err := store.replaceConfig(config); err != nil {
+				configErr = fmt.Errorf("validate gateway config: %w", err)
+			}
+		}
+	}
 	if path == "" {
-		return store, nil
+		return store, configErr
 	}
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
-		return store, nil
+		return store, configErr
 	}
 	if err != nil {
 		return nil, err
@@ -28,12 +45,20 @@ func loadStore(path string) (*Store, error) {
 	if err := json.Unmarshal(data, &state); err != nil {
 		return nil, err
 	}
-	if state.Subject.ID != "" {
-		store.updateSubject(state.Subject)
+	if len(state.Config.Upstreams) > 0 || len(state.Config.Routes) > 0 {
+		if err := store.replaceConfig(state.Config); err != nil {
+			return nil, err
+		}
+		return store, nil
 	}
+	if state.Subject.ID != "" {
+		state.Subject.Match = normalizeMatch(state.Subject.Match)
+		store.gateway.Subjects = []Subject{state.Subject}
+	}
+	store.gateway.Rules = nil
 	for _, rule := range state.Rules {
 		if rule.ID != "" && rule.Action == "block" {
-			store.rules[rule.ID] = rule
+			store.gateway.Rules = append(store.gateway.Rules, rule)
 		}
 	}
 	return store, nil
@@ -43,12 +68,7 @@ func (s *Store) persist(path string) error {
 	if path == "" {
 		return nil
 	}
-	s.mu.RLock()
-	state := persistedControlState{Subject: s.subject, Rules: make([]Rule, 0, len(s.rules))}
-	for _, rule := range s.rules {
-		state.Rules = append(state.Rules, rule)
-	}
-	s.mu.RUnlock()
+	state := persistedControlState{Version: 2, Config: s.config()}
 	buffer, err := json.Marshal(state)
 	if err != nil {
 		return err

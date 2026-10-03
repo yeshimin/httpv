@@ -206,16 +206,23 @@ func TestNativePolicyVersionAndAckStatus(t *testing.T) {
 	if err != nil || second != 2 {
 		t.Fatalf("changed publish = %d, %v", second, err)
 	}
+	staleAck := path + ".ack.stale"
+	if err := os.WriteFile(staleAck, []byte("2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	restarted := newNativePolicyPublisher(path)
 	third, err := restarted.publish(config)
 	if err != nil || third != 3 {
 		t.Fatalf("restart publish = %d, %v", third, err)
 	}
+	if _, err := os.Stat(staleAck); !os.IsNotExist(err) {
+		t.Fatalf("stale worker ack was not removed: %v", err)
+	}
 	if err := os.WriteFile(path+".ack.42", []byte("3\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	status := restarted.status()
-	if status.State != "active" || status.Version != 3 || len(status.Acks) != 1 || status.Acks[0].Worker != "42" || status.Acks[0].Version != 3 {
+	if status.State != "active" || status.Mode != "native" || status.Version != 3 || len(status.Acks) != 1 || status.Acks[0].Worker != "42" || status.Acks[0].Version != 3 {
 		t.Fatalf("unexpected policy status: %#v", status)
 	}
 }
@@ -224,7 +231,7 @@ func TestControlStateSurvivesRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "control-state.json")
 	store := newStore()
 	store.updateSubject(Subject{
-		ID: "demo-api", Name: "Persistent API", Enabled: true, Display: true,
+		ID: "default", Name: "Persistent API", Enabled: true, Display: true,
 		Match: Match{PathPrefix: "/persistent"},
 		Gate:  Gate{Enabled: true, TimeoutMS: 4_000, TimeoutAction: "allow"},
 	})
@@ -242,5 +249,48 @@ func TestControlStateSurvivesRestart(t *testing.T) {
 	}
 	if len(config.Rules) != 1 || config.Rules[0].ID != rule.ID || config.Rules[0].PathPrefix != "/blocked" {
 		t.Fatalf("rules were not restored: %#v", config.Rules)
+	}
+}
+
+func TestGatewayConfigValidatesRouteReferences(t *testing.T) {
+	config := defaultGatewayConfig()
+	config.Routes[0].UpstreamID = "missing"
+	if err := validateGatewayConfig(normalizeGatewayConfig(config)); err == nil {
+		t.Fatal("expected an unknown upstream validation error")
+	}
+	config.Routes[0].UpstreamID = config.Upstreams[0].ID
+	config.Upstreams = append(config.Upstreams, Upstream{ID: "second", URL: "http://app:8080"})
+	config.Routes = append(config.Routes, Route{ID: "api", Enabled: true, Match: Match{Host: "api.local", PathPrefix: "/v1"}, UpstreamID: "second"})
+	if err := validateGatewayConfig(normalizeGatewayConfig(config)); err != nil {
+		t.Fatalf("valid multi-route configuration rejected: %v", err)
+	}
+}
+
+func TestNativePolicyDisablesMultiSubjectConfiguration(t *testing.T) {
+	config := defaultGatewayConfig()
+	config.Subjects = append(config.Subjects, Subject{ID: "second", Enabled: true, Display: true, Match: Match{PathPrefix: "/second"}, Gate: Gate{TimeoutAction: "block"}})
+	policy, err := encodeNativePolicy(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy[5] != 0 || binary.BigEndian.Uint16(policy[8:10]) != 0 {
+		t.Fatalf("multi-subject policy must fall back to Lua: header=%v", policy[:nativePolicyHeaderLen])
+	}
+}
+
+func TestPersistedStateRecoversWhenInitialConfigIsMissing(t *testing.T) {
+	directory := t.TempDir()
+	statePath := filepath.Join(directory, "control-state.json")
+	store := newStore()
+	store.updateSubject(Subject{ID: "default", Name: "Recovered", Enabled: true, Display: true, Match: Match{PathPrefix: "/"}, Gate: Gate{TimeoutAction: "block"}})
+	if err := store.persist(statePath); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := loadStore(statePath, filepath.Join(directory, "missing.json"))
+	if err != nil {
+		t.Fatalf("persisted state should recover without the initial file: %v", err)
+	}
+	if restored.config().Subjects[0].Name != "Recovered" {
+		t.Fatalf("unexpected restored config: %#v", restored.config())
 	}
 }

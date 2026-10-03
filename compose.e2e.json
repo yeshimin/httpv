@@ -7,7 +7,9 @@
         "HTTPV_OPENRESTY_ADMIN_URL": "http://openresty:8091",
         "HTTPV_GATEWAY_URL": "http://openresty:8088",
         "HTTPV_NATIVE_POLICY_PATH": "/run/httpv/policy.bin",
-        "HTTPV_CONTROL_STATE_PATH": "/run/httpv/control-state.json"
+        "HTTPV_CONTROL_STATE_PATH": "/run/httpv/control-state.json",
+        "HTTPV_DEFAULT_UPSTREAM_URL": "http://demo:9000",
+        "HTTPV_DEFAULT_UPSTREAM_HOST": "demo:9000"
       },
       "ports": ["18090:8090"],
       "volumes": ["httpv_runtime:/run/httpv"],
@@ -47,7 +49,7 @@
     },
     "web": {
       "build": "./web",
-      "ports": ["15173:5173"],
+      "ports": ["15173:80"],
       "depends_on": ["control"],
       "networks": ["internal"]
     }
