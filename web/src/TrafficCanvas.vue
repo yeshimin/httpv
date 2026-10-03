@@ -18,6 +18,7 @@ export type TrafficRecord = {
   status?: number
   action?: string
   durationMs?: number
+  requestBytes?: number
   responseBytes?: number
 }
 
@@ -69,8 +70,8 @@ function hashFraction(requestId: string, salt: string) {
 }
 
 function requestPoints(requestId: string, width: number, height: number) {
-  const top = 48
-  const bottom = Math.max(top + 1, height - 34)
+  const top = 34
+  const bottom = Math.max(top + 1, height - 18)
   const range = bottom - top
   const y = top + range * (0.04 + hashFraction(requestId, 'lane') * 0.92)
   return {
@@ -104,8 +105,8 @@ function updateStaticParticle(entry: StaticParticle, selected: boolean) {
   entry.particle.x = point.x
   entry.particle.y = point.y
   entry.particle.color = selected ? 0xf5fbff : colorFor(entry.record)
-  entry.particle.scaleX = selected ? 8 : 6
-  entry.particle.scaleY = selected ? 8 : 6
+  entry.particle.scaleX = selected ? 9 : 6
+  entry.particle.scaleY = selected ? 4 : 2
   entry.key = staticKey(entry.record, selected)
 }
 
@@ -118,8 +119,8 @@ function addStaticParticle(record: TrafficRecord, selected: boolean) {
     y: point.y,
     anchorX: 0.5,
     anchorY: 0.5,
-    scaleX: selected ? 8 : 6,
-    scaleY: selected ? 8 : 6,
+    scaleX: selected ? 9 : 6,
+    scaleY: selected ? 4 : 2,
     tint: selected ? 0xf5fbff : colorFor(record)
   })
   staticContainer.addParticle(particle)
@@ -274,10 +275,10 @@ function drawLane() {
   const clientX = width * 0.1
   const gatewayX = width * 0.48
   const upstreamX = width * 0.86
-  lane.rect(gatewayX - 48, top, 96, bottom - top).fill({ color: 0x75a7ff, alpha: 0.075 })
-  lane.rect(gatewayX - 48, top, 96, bottom - top).stroke({ color: 0x5f87a8, width: 1.5, alpha: 0.8 })
-  lane.moveTo(clientX, top).lineTo(clientX, bottom).stroke({ color: 0x5f87a8, width: 1.5, alpha: 0.72 })
-  lane.moveTo(upstreamX, top).lineTo(upstreamX, bottom).stroke({ color: 0x5f87a8, width: 1.5, alpha: 0.72 })
+  lane.rect(gatewayX - 36, top, 72, bottom - top).fill({ color: 0x75a7ff, alpha: 0.045 })
+  lane.rect(gatewayX - 36, top, 72, bottom - top).stroke({ color: 0x5f87a8, width: 1, alpha: 0.72 })
+  lane.moveTo(clientX, top).lineTo(clientX, bottom).stroke({ color: 0x5f87a8, width: 1, alpha: 0.6 })
+  lane.moveTo(upstreamX, top).lineTo(upstreamX, bottom).stroke({ color: 0x5f87a8, width: 1, alpha: 0.6 })
   app.stage.addChildAt(lane, 0)
 }
 
@@ -345,22 +346,27 @@ function render() {
     let position = points.gateway
     let alpha = 1
     let pulse = 0
+    let direction: -1 | 0 | 1 = 1
     if (now < ingressEnd) position = interpolate(points.client, points.gateway, (now - start) / ingressDuration)
     else if (record.abortedAt !== undefined) {
       position = points.gateway
+      direction = 0
       const fadeStart = record.abortedAt + props.renderDelayMs
       if (now > fadeStart) alpha = Math.max(0, 1 - (now - fadeStart) / Math.max(1, props.trailMs))
     } else if (waitingAtGate) {
       position = points.gateway
+      direction = 0
       pulse = 1
     } else if (visualResponseStart === undefined || now < visualResponseStart) {
       if (now < forwardStart) position = points.gateway
       else if (now < forwardEnd) position = interpolate(points.gateway, points.upstream, (now - forwardStart) / forwardDuration)
       else {
         position = points.upstream
+        direction = 0
         pulse = 1
       }
     } else {
+      direction = -1
       const progress = Math.min(1, (now - visualResponseStart) / responseDuration)
       if (blockedAtGateway) position = interpolate(points.gateway, points.client, progress)
       else if (progress < 0.5) position = interpolate(responseOrigin, points.gateway, progress * 2)
@@ -370,13 +376,20 @@ function render() {
 
     const color = colorFor(record)
     particle.dot.clear()
-    particle.dot.moveTo(points.client.x - position.x, points.client.y - position.y)
-    particle.dot.lineTo(points.gateway.x - position.x, points.gateway.y - position.y)
-    particle.dot.lineTo(points.upstream.x - position.x, points.upstream.y - position.y)
-    particle.dot.stroke({ color, width: 1, alpha: alpha * 0.16 })
-    particle.dot.circle(0, 0, 11 + pulse * (4 + Math.sin(now / 140) * 2)).fill({ color, alpha: alpha * (pulse > 0 ? 0.2 : 0.12) })
-    particle.dot.circle(0, 0, 5).fill({ color, alpha })
-    if (selectedIds.has(id)) particle.dot.circle(0, 0, 10).stroke({ color: 0xf5fbff, width: 2, alpha: 0.95 })
+    if (direction !== 0) {
+      const tailStart = direction === 1 ? -26 : 26
+      const tailEnd = direction === 1 ? -6 : 6
+      particle.dot.moveTo(tailStart, 0).lineTo(tailEnd, 0).stroke({ color, width: 1, alpha: alpha * 0.42 })
+      if (direction === 1) particle.dot.moveTo(-5, -3).lineTo(6, 0).lineTo(-5, 3).closePath().fill({ color, alpha })
+      else particle.dot.moveTo(5, -3).lineTo(-6, 0).lineTo(5, 3).closePath().fill({ color, alpha })
+    } else {
+      particle.dot.moveTo(0, -4).lineTo(4, 0).lineTo(0, 4).lineTo(-4, 0).closePath().fill({ color, alpha })
+    }
+    if (pulse > 0) {
+      const pulseSize = 7 + Math.sin(now / 140) * 1.5
+      particle.dot.rect(-pulseSize, -pulseSize, pulseSize * 2, pulseSize * 2).stroke({ color, width: 1, alpha: alpha * 0.38 })
+    }
+    if (selectedIds.has(id)) particle.dot.rect(-9, -6, 18, 12).stroke({ color: 0xf5fbff, width: 1.5, alpha: 0.95 })
     particle.dot.x = position.x
     particle.dot.y = position.y
     particle.dot.alpha = alpha
@@ -448,7 +461,7 @@ onBeforeUnmount(() => {
 <style scoped>
 .traffic-canvas { position: relative; width: 100%; height: 100%; min-height: 330px; overflow: hidden; }
 .traffic-canvas :deep(canvas) { position: absolute; inset: 0; width: 100%; height: 100%; z-index: 0; }
-.lane-label { position: absolute; z-index: 1; top: 12px; transform: translateX(-50%); color: #b9d2e4; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; pointer-events: none; }
+.lane-label { position: absolute; z-index: 1; top: 8px; transform: translateX(-50%); color: #9eb8ca; font-size: 10px; font-weight: 750; letter-spacing: .11em; text-transform: uppercase; pointer-events: none; }
 .label-client { left: 10%; }
 .label-gateway { left: 48%; }
 .label-upstream { left: 86%; }

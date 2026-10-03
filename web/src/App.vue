@@ -8,7 +8,7 @@ type Subject = { id: string; name: string; enabled: boolean; display: boolean; m
 type Rule = { id: string; action: string; path_prefix: string; method: string; client_ip: string; created_at: number }
 type EventMessage = {
   phase: string; request_id: string; subject_id: string; timestamp_ms: number; method?: string; path?: string; client_ip?: string;
-  status?: number; duration_ms?: number; response_bytes?: number; action?: string
+  status?: number; duration_ms?: number; request_bytes?: number; response_bytes?: number; action?: string
 }
 type TrafficSummaryPath = { subject_id: string; method: string; path: string; count: number; blocked: number; pending: number }
 type TrafficSummary = {
@@ -39,7 +39,11 @@ const messages: Record<Locale, Record<string, string>> = {
     selectedPending: '其中 {count} 条仍待人工决定', batchHistory: '这些请求已经结束；只能为后续同类流量创建规则。', allowSelected: '放行选中待决请求', blockSelected: '阻断选中待决请求', blockSelectedFuture: '阻断选中路径的后续流量',
     burst: '并发 20 条', emergencyBlock: '紧急阻断全部待决', rendering: '绘制 {shown}/{total}',
     overloadMode: '高流量聚合', overloadSummary: '已聚合 {total} 个普通事件 · {rate}/秒', overloadHint: '待决和阻断请求仍逐条展示、可直接操作。', blockFlow: '阻断此流量',
-    policyActive: '策略 C v{version} 已生效', policyPending: '策略 C v{version} 同步中', policyDisabled: '策略 C 未启用'
+    policyActive: '策略 C v{version} 已生效', policyPending: '策略 C v{version} 同步中', policyDisabled: '策略 C 未启用',
+    activeFlows: '活跃', rate: '速率', p95: 'P95', overview: '概览', headers: 'Header', body: 'Body',
+    requestId: '请求 ID', subject: '监管对象', requestSize: '请求大小', started: '开始时间', finished: '完成时间',
+    requestHeaders: '请求 Header', responseHeaders: '响应 Header', requestBody: '请求 Body', responseBody: '响应 Body',
+    captureOff: '内容采集尚未开启。后续将按规则限长、脱敏并默认关闭。'
   },
   en: {
     commandSurface: 'Traffic command surface', connecting: 'connecting', live: 'live', closed: 'closed',
@@ -61,7 +65,11 @@ const messages: Record<Locale, Record<string, string>> = {
     selectedPending: '{count} still waiting for a decision', batchHistory: 'These requests have completed; only future-match rules can be created.', allowSelected: 'Allow selected pending', blockSelected: 'Block selected pending', blockSelectedFuture: 'Block future traffic for selected paths',
     burst: 'Burst ×20', emergencyBlock: 'Emergency block all waiting', rendering: 'rendering {shown}/{total}',
     overloadMode: 'High-traffic aggregation', overloadSummary: '{total} ordinary events aggregated · {rate}/s', overloadHint: 'Waiting and blocked requests remain individually visible and actionable.', blockFlow: 'Block this flow',
-    policyActive: 'Policy C v{version} active', policyPending: 'Policy C v{version} syncing', policyDisabled: 'Policy C disabled'
+    policyActive: 'Policy C v{version} active', policyPending: 'Policy C v{version} syncing', policyDisabled: 'Policy C disabled',
+    activeFlows: 'active', rate: 'rate', p95: 'P95', overview: 'Overview', headers: 'Headers', body: 'Body',
+    requestId: 'Request ID', subject: 'Subject', requestSize: 'Request size', started: 'Started', finished: 'Finished',
+    requestHeaders: 'Request headers', responseHeaders: 'Response headers', requestBody: 'Request body', responseBody: 'Response body',
+    captureOff: 'Content capture is not enabled. It will be opt-in, size-limited, and redacted.'
   }
 }
 
@@ -76,6 +84,7 @@ const selectedID = ref<string>()
 const selectedIds = ref<string[]>([])
 const renderDelayMs = ref(0)
 const trailMs = ref(3000)
+const detailTab = ref<'overview' | 'headers' | 'body'>('overview')
 const connectionState = ref<'connecting' | 'live' | 'closed'>('connecting')
 const locale = ref<Locale>(localStorage.getItem('httpv-locale') === 'en' ? 'en' : 'zh')
 const nowMs = ref(Date.now())
@@ -106,6 +115,13 @@ const records = computed(() => Array.from(traffic.value.values()).sort((a, b) =>
 const selected = computed(() => selectedID.value ? traffic.value.get(selectedID.value) : undefined)
 const selectedRecords = computed(() => selectedIds.value.map((id) => traffic.value.get(id)).filter((record): record is TrafficRecord => Boolean(record)))
 const pendingCount = computed(() => records.value.filter(isPendingActive).length)
+const activeFlowCount = computed(() => records.value.filter((record) => !record.finishedAt && !record.abortedAt && !(record.action === 'block' && record.blockedAt)).length)
+const currentRps = computed(() => records.value.filter((record) => record.startedAt >= nowMs.value - 1_000).length)
+const p95Duration = computed(() => {
+  const durations = records.value.map((record) => record.durationMs).filter((duration): duration is number => duration !== undefined).sort((a, b) => a - b)
+  if (durations.length === 0) return '—'
+  return durations[Math.min(durations.length - 1, Math.ceil(durations.length * 0.95) - 1)]
+})
 function isPendingActive(record: TrafficRecord) {
   if (!record.pendingAt || record.releasedAt || record.blockedAt || record.abortedAt || record.finishedAt) return false
   const timeout = subject.value.gate.timeout_ms
@@ -174,6 +190,7 @@ function applyEventToMap(event: EventMessage, target: Map<string, TrafficRecord>
   record.method = event.method ?? record.method
   record.path = event.path ?? record.path
   record.clientIp = event.client_ip ?? record.clientIp
+  record.requestBytes = event.request_bytes ?? record.requestBytes
   if (event.phase === 'request_started') record.startedAt = event.timestamp_ms
   if (event.phase === 'request_pending') record.pendingAt = event.timestamp_ms
   if (event.phase === 'response_started') record.responseStartedAt = event.timestamp_ms
@@ -318,11 +335,13 @@ async function decide(action: 'allow' | 'block') {
 }
 
 function selectOne(record: TrafficRecord) {
+  detailTab.value = 'overview'
   selectedID.value = record.requestId
   selectedIds.value = [record.requestId]
 }
 
 function selectMany(records: TrafficRecord[]) {
+  detailTab.value = 'overview'
   const ids = [...new Set(records.map((record) => record.requestId))]
   selectedIds.value = ids
   selectedID.value = ids.length === 1 ? ids[0] : undefined
@@ -414,6 +433,11 @@ async function runGuidedDemo() {
   await sendTestRequest()
 }
 
+function formatTimestamp(value?: number) {
+  if (value === undefined) return t('unavailable')
+  return new Date(value).toLocaleTimeString(locale.value === 'zh' ? 'zh-CN' : 'en-US', { hour12: false, fractionalSecondDigits: 3 })
+}
+
 onMounted(async () => {
   clockTimer = window.setInterval(() => {
     nowMs.value = Date.now()
@@ -446,7 +470,12 @@ onBeforeUnmount(() => {
     <div class="command-layout">
       <section class="canvas-panel" :class="{ 'has-overload': overloadActive && overloadSummary }">
         <div class="canvas-header">
-          <div><strong>{{ subject.name }}</strong><span>{{ t('tracked', { count: records.length, pending: pendingCount }) }} · {{ t('rendering', { shown: animatedIds.length, total: records.length }) }}</span></div>
+          <div class="subject-summary"><strong>{{ subject.name }}</strong><span>{{ t('tracked', { count: records.length, pending: pendingCount }) }} · {{ t('rendering', { shown: animatedIds.length, total: records.length }) }}</span></div>
+          <div class="live-metrics">
+            <span><b>{{ currentRps }}</b>{{ t('rate') }}/s</span>
+            <span><b>{{ activeFlowCount }}</b>{{ t('activeFlows') }}</span>
+            <span><b>{{ p95Duration }}</b>{{ t('p95') }}<i v-if="p95Duration !== '—'">ms</i></span>
+          </div>
           <div class="header-actions">
             <button class="gate-toggle" :class="{ active: subject.gate.enabled }" @click="toggleGate">{{ subject.gate.enabled ? t('gateOn') : t('gateOff') }}</button>
             <button v-if="pendingCount > 0" class="emergency-button" @click="blockAllPending">{{ t('emergencyBlock') }}</button>
@@ -484,15 +513,26 @@ onBeforeUnmount(() => {
         </article>
 
         <article class="panel detail-panel">
-        <h2>{{ t('selectedRequest') }}</h2>
+        <div class="panel-title"><h2>{{ t('selectedRequest') }}</h2><span v-if="selected?.status" class="status-code" :class="{ error: selected.status >= 400 }">{{ selected.status }}</span></div>
         <template v-if="selected">
-          <dl>
-            <div><dt>{{ t('request') }}</dt><dd>{{ selected.method }} {{ selected.path }}</dd></div>
+          <div class="request-title"><b>{{ selected.method }}</b><code>{{ selected.path }}</code></div>
+          <nav class="detail-tabs">
+            <button :class="{ active: detailTab === 'overview' }" @click="detailTab = 'overview'">{{ t('overview') }}</button>
+            <button :class="{ active: detailTab === 'headers' }" @click="detailTab = 'headers'">{{ t('headers') }}</button>
+            <button :class="{ active: detailTab === 'body' }" @click="detailTab = 'body'">{{ t('body') }}</button>
+          </nav>
+          <dl v-if="detailTab === 'overview'" class="metadata-grid">
+            <div><dt>{{ t('requestId') }}</dt><dd class="mono">{{ selected.requestId }}</dd></div>
+            <div><dt>{{ t('subject') }}</dt><dd>{{ selected.subjectId }}</dd></div>
             <div><dt>{{ t('client') }}</dt><dd>{{ selected.clientIp || t('unavailable') }}</dd></div>
-            <div><dt>{{ t('status') }}</dt><dd>{{ selected.status ?? t('inFlight') }}</dd></div>
-            <div><dt>{{ t('duration') }}</dt><dd>{{ selected.durationMs === undefined ? t('inFlight') : `${selected.durationMs}ms` }}</dd></div>
-            <div><dt>{{ t('responseSize') }}</dt><dd>{{ selected.responseBytes === undefined ? t('inFlight') : `${selected.responseBytes} bytes` }}</dd></div>
+            <div><dt>{{ t('requestSize') }}</dt><dd>{{ selected.requestBytes === undefined ? t('unavailable') : `${selected.requestBytes} B` }}</dd></div>
+            <div><dt>{{ t('started') }}</dt><dd>{{ formatTimestamp(selected.startedAt) }}</dd></div>
+            <div><dt>{{ t('finished') }}</dt><dd>{{ formatTimestamp(selected.finishedAt ?? selected.abortedAt ?? selected.blockedAt) }}</dd></div>
+            <div><dt>{{ t('duration') }}</dt><dd>{{ selected.durationMs === undefined ? t('inFlight') : `${selected.durationMs} ms` }}</dd></div>
+            <div><dt>{{ t('responseSize') }}</dt><dd>{{ selected.responseBytes === undefined ? t('inFlight') : `${selected.responseBytes} B` }}</dd></div>
           </dl>
+          <div v-else-if="detailTab === 'headers'" class="capture-grid"><section><b>{{ t('requestHeaders') }}</b><pre>{{ t('captureOff') }}</pre></section><section><b>{{ t('responseHeaders') }}</b><pre>{{ t('captureOff') }}</pre></section></div>
+          <div v-else class="capture-grid"><section><b>{{ t('requestBody') }}</b><pre>{{ t('captureOff') }}</pre></section><section><b>{{ t('responseBody') }}</b><pre>{{ t('captureOff') }}</pre></section></div>
           <div class="actions">
             <p v-if="selected.pendingAt && !selected.releasedAt && !selected.blockedAt && !selected.abortedAt && !selected.finishedAt" class="pending-countdown" :class="{ expired: !selectedPendingActive }">{{ selectedPendingActive ? selectedPendingLabel : t('decisionExpired') }}</p>
             <button :disabled="!selectedPendingActive" class="allow" @click="decide('allow')">{{ t('allowPending') }}</button>
