@@ -376,20 +376,36 @@ function render() {
 
     const color = colorFor(record)
     particle.dot.clear()
+    const shimmer = (Math.sin(now / 95 + hashFraction(id, 'shimmer') * Math.PI * 2) + 1) / 2
     if (direction !== 0) {
-      const tailStart = direction === 1 ? -26 : 26
-      const tailEnd = direction === 1 ? -6 : 6
-      particle.dot.moveTo(tailStart, 0).lineTo(tailEnd, 0).stroke({ color, width: 1, alpha: alpha * 0.42 })
-      if (direction === 1) particle.dot.moveTo(-5, -3).lineTo(6, 0).lineTo(-5, 3).closePath().fill({ color, alpha })
-      else particle.dot.moveTo(5, -3).lineTo(-6, 0).lineTo(5, 3).closePath().fill({ color, alpha })
+      const behind = -direction
+      particle.dot.moveTo(behind * 34, 0).lineTo(behind * 8, 0).stroke({ color, width: 1, alpha: alpha * 0.18 })
+      particle.dot.moveTo(behind * 22, -1).lineTo(behind * 7, -1).stroke({ color, width: 1, alpha: alpha * (0.28 + shimmer * 0.16) })
+      particle.dot.moveTo(-8, 0).lineTo(-5, -3).lineTo(5, -3).lineTo(8, 0).lineTo(5, 3).lineTo(-5, 3).closePath().fill({ color, alpha: alpha * (0.1 + shimmer * 0.08) })
+      particle.dot.moveTo(-6, 0).lineTo(-4, -2).lineTo(4, -2).lineTo(6, 0).lineTo(4, 2).lineTo(-4, 2).closePath().fill({ color, alpha })
+      const glintX = -3 + shimmer * 6
+      particle.dot.rect(glintX, -1, 2, 2).fill({ color: 0xeaffff, alpha: alpha * 0.86 })
     } else {
-      particle.dot.moveTo(0, -4).lineTo(4, 0).lineTo(0, 4).lineTo(-4, 0).closePath().fill({ color, alpha })
+      const scanY = -5 + shimmer * 10
+      particle.dot.rect(-6, -6, 12, 12).stroke({ color, width: 1, alpha: alpha * (0.24 + shimmer * 0.2) })
+      particle.dot.moveTo(-4, 0).lineTo(0, -4).lineTo(4, 0).lineTo(0, 4).closePath().fill({ color, alpha })
+      particle.dot.moveTo(-5, scanY).lineTo(5, scanY).stroke({ color: 0xeaffff, width: 1, alpha: alpha * 0.42 })
     }
     if (pulse > 0) {
-      const pulseSize = 7 + Math.sin(now / 140) * 1.5
-      particle.dot.rect(-pulseSize, -pulseSize, pulseSize * 2, pulseSize * 2).stroke({ color, width: 1, alpha: alpha * 0.38 })
+      const pulseSize = 8 + Math.sin(now / 140) * 1.5
+      particle.dot.moveTo(-pulseSize, -pulseSize + 4).lineTo(-pulseSize, -pulseSize).lineTo(-pulseSize + 4, -pulseSize)
+      particle.dot.moveTo(pulseSize - 4, -pulseSize).lineTo(pulseSize, -pulseSize).lineTo(pulseSize, -pulseSize + 4)
+      particle.dot.moveTo(pulseSize, pulseSize - 4).lineTo(pulseSize, pulseSize).lineTo(pulseSize - 4, pulseSize)
+      particle.dot.moveTo(-pulseSize + 4, pulseSize).lineTo(-pulseSize, pulseSize).lineTo(-pulseSize, pulseSize - 4)
+      particle.dot.stroke({ color, width: 1, alpha: alpha * 0.52 })
     }
-    if (selectedIds.has(id)) particle.dot.rect(-9, -6, 18, 12).stroke({ color: 0xf5fbff, width: 1.5, alpha: 0.95 })
+    if (selectedIds.has(id)) {
+      particle.dot.moveTo(-10, -2).lineTo(-10, -6).lineTo(-6, -6)
+      particle.dot.moveTo(6, -6).lineTo(10, -6).lineTo(10, -2)
+      particle.dot.moveTo(10, 2).lineTo(10, 6).lineTo(6, 6)
+      particle.dot.moveTo(-6, 6).lineTo(-10, 6).lineTo(-10, 2)
+      particle.dot.stroke({ color: 0xf5fbff, width: 1.25, alpha: 0.95 })
+    }
     particle.dot.x = position.x
     particle.dot.y = position.y
     particle.dot.alpha = alpha
