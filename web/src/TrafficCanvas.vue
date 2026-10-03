@@ -53,6 +53,12 @@ function colorFor(record: TrafficRecord): number {
   return 0x75a7ff
 }
 
+function terminalAt(record: TrafficRecord) {
+  if (record.finishedAt !== undefined) return record.finishedAt
+  if (record.action === 'block' && record.blockedAt !== undefined) return record.blockedAt
+  return undefined
+}
+
 function hashFraction(requestId: string, salt: string) {
   let hash = 0
   const input = `${requestId}:${salt}`
@@ -293,8 +299,9 @@ function render() {
 
   let staticDirty = false
   for (const [id, entry] of staticParticles) {
-    const finishedAt = entry.record.finishedAt === undefined ? undefined : entry.record.finishedAt + props.renderDelayMs
-    if (finishedAt !== undefined && now > finishedAt + Math.max(1_000, props.trailMs)) {
+    const terminal = terminalAt(entry.record)
+    const visualEnd = terminal === undefined ? undefined : terminal + props.renderDelayMs + Math.max(1_000, props.trailMs)
+    if (visualEnd !== undefined && now > visualEnd) {
       removeStaticParticle(id)
       retired.add(id)
       staticDirty = true
@@ -323,7 +330,8 @@ function render() {
     const visualResponseStart = actualResponseStart === undefined ? undefined : Math.max(actualResponseStart, blockedAtGateway ? ingressEnd : forwardEnd)
     const responseEnd = visualResponseStart === undefined ? undefined : visualResponseStart + responseDuration
     const trailEnd = responseEnd === undefined ? undefined : responseEnd + props.trailMs
-    if (record.finishedAt && trailEnd !== undefined && now > trailEnd) {
+    const terminal = terminalAt(record)
+    if (terminal !== undefined && trailEnd !== undefined && now > trailEnd) {
       removeDynamicParticle(id)
       retired.add(id)
       continue
@@ -348,7 +356,7 @@ function render() {
       if (blockedAtGateway) position = interpolate(points.gateway, points.client, progress)
       else if (progress < 0.5) position = interpolate(responseOrigin, points.gateway, progress * 2)
       else position = interpolate(points.gateway, points.client, (progress - 0.5) * 2)
-      if (responseEnd !== undefined && record.finishedAt && now > responseEnd) alpha = Math.max(0, 1 - (now - responseEnd) / Math.max(1, props.trailMs))
+      if (responseEnd !== undefined && terminal !== undefined && now > responseEnd) alpha = Math.max(0, 1 - (now - responseEnd) / Math.max(1, props.trailMs))
     }
 
     const color = colorFor(record)

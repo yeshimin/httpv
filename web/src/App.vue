@@ -206,12 +206,16 @@ function enqueueEvent(event: EventMessage) {
   if (eventFrame === undefined) eventFrame = window.requestAnimationFrame(flushEvents)
 }
 
-function pruneExpiredPending() {
+function pruneExpiredRecords() {
   const next = new Map(traffic.value)
   let changed = false
   for (const [id, record] of next) {
     const unresolved = Boolean(record.pendingAt && !record.releasedAt && !record.blockedAt && !record.finishedAt)
-    if (unresolved && !isPendingActive(record)) {
+    const blockedWithoutFinish = record.action === 'block' && record.blockedAt !== undefined && record.finishedAt === undefined
+    const blockedVisualEnd = blockedWithoutFinish
+      ? record.blockedAt! + renderDelayMs.value + 420 + Math.max(1_000, trailMs.value)
+      : undefined
+    if ((unresolved && !isPendingActive(record)) || (blockedVisualEnd !== undefined && nowMs.value > blockedVisualEnd)) {
       next.delete(id)
       changed = true
     }
@@ -396,7 +400,7 @@ async function runGuidedDemo() {
 onMounted(async () => {
   clockTimer = window.setInterval(() => {
     nowMs.value = Date.now()
-    pruneExpiredPending()
+    pruneExpiredRecords()
   }, 250)
   policyTimer = window.setInterval(refreshPolicyStatus, 1_000)
   try { await bootstrap() } catch (error) { console.error(error) }
