@@ -83,6 +83,7 @@ const nowMs = ref(Date.now())
 const burstBusy = ref(false)
 const overloadSummary = ref<TrafficSummary>()
 const policyStatus = ref<NativePolicyStatus>({ version: 0, state: 'unpublished', acks: [] })
+const timeoutEventGraceMs = 2_000
 let socket: WebSocket | undefined
 let clockTimer: number | undefined
 let policyTimer: number | undefined
@@ -187,7 +188,9 @@ function applyEventToMap(event: EventMessage, target: Map<string, TrafficRecord>
     record.action = event.action
     if (event.status) record.status = event.status
   }
-  if (event.phase === 'request_decided' && event.action === 'allow') record.releasedAt = event.timestamp_ms
+  if ((event.phase === 'request_decided' || event.phase === 'request_timeout') && event.action === 'allow') {
+    record.releasedAt = event.timestamp_ms
+  }
   if (event.phase === 'request_aborted') {
     record.action = 'abort'
     record.abortedAt = event.timestamp_ms
@@ -226,8 +229,11 @@ function pruneExpiredRecords() {
   let changed = false
   for (const [id, record] of next) {
     const unresolved = Boolean(record.pendingAt && !record.releasedAt && !record.blockedAt && !record.abortedAt && !record.finishedAt)
+    const unresolvedExpiry = unresolved && subject.value.gate.timeout_ms > 0
+      ? record.pendingAt! + subject.value.gate.timeout_ms + timeoutEventGraceMs
+      : undefined
     const terminalVisualEnd = recordVisualEnd(record)
-    if ((unresolved && !isPendingActive(record)) || (terminalVisualEnd !== undefined && nowMs.value > terminalVisualEnd)) {
+    if ((unresolvedExpiry !== undefined && nowMs.value > unresolvedExpiry) || (terminalVisualEnd !== undefined && nowMs.value > terminalVisualEnd)) {
       next.delete(id)
       changed = true
     }
