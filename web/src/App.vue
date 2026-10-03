@@ -206,6 +206,22 @@ function enqueueEvent(event: EventMessage) {
   if (eventFrame === undefined) eventFrame = window.requestAnimationFrame(flushEvents)
 }
 
+function pruneExpiredPending() {
+  const next = new Map(traffic.value)
+  let changed = false
+  for (const [id, record] of next) {
+    const unresolved = Boolean(record.pendingAt && !record.releasedAt && !record.blockedAt && !record.finishedAt)
+    if (unresolved && !isPendingActive(record)) {
+      next.delete(id)
+      changed = true
+    }
+  }
+  if (!changed) return
+  traffic.value = next
+  selectedIds.value = selectedIds.value.filter((id) => next.has(id))
+  if (selectedID.value && !next.has(selectedID.value)) selectedID.value = undefined
+}
+
 function applySummary(summary: TrafficSummary) {
   overloadSummary.value = summary
 }
@@ -225,7 +241,7 @@ async function bootstrap() {
   for (const event of data.events as EventMessage[]) applyEventToMap(event, next)
   const cutoff = Date.now() - 15_000
   for (const [id, record] of next) {
-    const keepPending = Boolean(record.pendingAt && !record.releasedAt && !record.blockedAt && !record.finishedAt)
+    const keepPending = isPendingActive(record)
     if (!keepPending && record.startedAt < cutoff) next.delete(id)
   }
   traffic.value = next
@@ -378,7 +394,10 @@ async function runGuidedDemo() {
 }
 
 onMounted(async () => {
-  clockTimer = window.setInterval(() => { nowMs.value = Date.now() }, 250)
+  clockTimer = window.setInterval(() => {
+    nowMs.value = Date.now()
+    pruneExpiredPending()
+  }, 250)
   policyTimer = window.setInterval(refreshPolicyStatus, 1_000)
   try { await bootstrap() } catch (error) { console.error(error) }
   await refreshPolicyStatus()
