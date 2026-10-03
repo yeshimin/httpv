@@ -135,12 +135,25 @@ func TestHubSendsOverloadSummaryAfterDetailBudget(t *testing.T) {
 	}
 }
 
-func TestOnlyResponseFinishedEndsBrowserLifecycle(t *testing.T) {
+func TestTerminalEventsEndBrowserLifecycle(t *testing.T) {
 	if terminalEvent(TrafficEvent{Phase: "request_blocked"}) {
 		t.Fatal("block event must retain the lifecycle for response events")
 	}
 	if !terminalEvent(TrafficEvent{Phase: "response_finished"}) {
 		t.Fatal("response finish must close the browser lifecycle")
+	}
+	if !terminalEvent(TrafficEvent{Phase: "request_aborted"}) {
+		t.Fatal("client abort must close the browser lifecycle")
+	}
+}
+
+func TestDecodeRequestAbortedPhase(t *testing.T) {
+	phase, ok := phaseName(8)
+	if !ok || phase != "request_aborted" {
+		t.Fatalf("phase 8 = %q, %v; want request_aborted", phase, ok)
+	}
+	if !priorityEvent(TrafficEvent{Phase: phase}) {
+		t.Fatal("client abort must bypass visualization sampling")
 	}
 }
 

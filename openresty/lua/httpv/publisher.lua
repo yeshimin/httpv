@@ -9,7 +9,8 @@ local phase_codes = {
   request_timeout = 4,
   request_blocked = 5,
   response_started = 6,
-  response_finished = 7
+  response_finished = 7,
+  request_aborted = 8
 }
 
 local queue = {}

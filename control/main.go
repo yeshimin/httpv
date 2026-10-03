@@ -296,11 +296,11 @@ type Hub struct {
 func newHub() *Hub { return &Hub{clients: map[*client]struct{}{}} }
 
 func terminalEvent(event TrafficEvent) bool {
-	return event.Phase == "response_finished"
+	return event.Phase == "response_finished" || event.Phase == "request_aborted"
 }
 
 func priorityEvent(event TrafficEvent) bool {
-	return event.Phase == "request_pending" || event.Phase == "request_decided" || event.Phase == "request_timeout" || event.Phase == "request_blocked"
+	return event.Phase == "request_pending" || event.Phase == "request_decided" || event.Phase == "request_timeout" || event.Phase == "request_blocked" || event.Phase == "request_aborted"
 }
 
 func (c *client) aggregate(event TrafficEvent) {
@@ -582,6 +582,8 @@ func phaseName(code byte) (string, bool) {
 		return "response_started", true
 	case 7:
 		return "response_finished", true
+	case 8:
+		return "request_aborted", true
 	default:
 		return "", false
 	}
@@ -757,6 +759,7 @@ func main() {
 	r.Get("/api/policy-status", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, nativePolicy.status())
 	})
+	demoClient := &http.Client{}
 	r.Post("/api/demo/burst", func(w http.ResponseWriter, r *http.Request) {
 		var payload struct {
 			Count   int `json:"count"`
@@ -772,7 +775,9 @@ func main() {
 				if err != nil {
 					return
 				}
-				response, err := (&http.Client{Timeout: 30 * time.Second}).Do(request)
+				// The manual gate owns the request lifetime. A fixed client timeout can
+				// race the gate timeout and abort the request just before its decision.
+				response, err := demoClient.Do(request)
 				if err == nil {
 					_ = response.Body.Close()
 				}

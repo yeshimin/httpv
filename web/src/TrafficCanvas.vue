@@ -12,6 +12,7 @@ export type TrafficRecord = {
   pendingAt?: number
   releasedAt?: number
   blockedAt?: number
+  abortedAt?: number
   responseStartedAt?: number
   finishedAt?: number
   status?: number
@@ -47,7 +48,7 @@ const staticParticles = new Map<string, StaticParticle>()
 const retired = new Set<string>()
 
 function colorFor(record: TrafficRecord): number {
-  if (record.action === 'block' || (record.status ?? 0) >= 400) return 0xff5c70
+  if (record.action === 'block' || record.action === 'abort' || (record.status ?? 0) >= 400) return 0xff5c70
   if (record.pendingAt && !record.releasedAt && !record.finishedAt) return 0xffc857
   if (record.responseStartedAt) return 0x63e6be
   return 0x75a7ff
@@ -55,6 +56,7 @@ function colorFor(record: TrafficRecord): number {
 
 function terminalAt(record: TrafficRecord) {
   if (record.finishedAt !== undefined) return record.finishedAt
+  if (record.abortedAt !== undefined) return record.abortedAt
   if (record.action === 'block' && record.blockedAt !== undefined) return record.blockedAt
   return undefined
 }
@@ -85,14 +87,15 @@ function interpolate(from: Point, to: Point, progress: number) {
 function staticPosition(record: TrafficRecord) {
   if (!app) return { x: 0, y: 0 }
   const points = requestPoints(record.requestId, app.renderer.width, app.renderer.height)
-  if (record.pendingAt && !record.releasedAt && !record.blockedAt && !record.finishedAt) return points.gateway
+  if (record.pendingAt && !record.releasedAt && !record.blockedAt && !record.abortedAt && !record.finishedAt) return points.gateway
+  if (record.abortedAt) return points.gateway
   if (record.action === 'block' || record.responseStartedAt) return points.gateway
   if (record.finishedAt) return points.client
   return points.upstream
 }
 
 function staticKey(record: TrafficRecord, selected: boolean) {
-  return `${record.pendingAt}:${record.releasedAt}:${record.blockedAt}:${record.responseStartedAt}:${record.finishedAt}:${record.action}:${record.status}:${selected}`
+  return `${record.pendingAt}:${record.releasedAt}:${record.blockedAt}:${record.abortedAt}:${record.responseStartedAt}:${record.finishedAt}:${record.action}:${record.status}:${selected}`
 }
 
 function updateStaticParticle(entry: StaticParticle, selected: boolean) {
@@ -319,7 +322,7 @@ function render() {
     }
     particle.dot.visible = true
     const ingressEnd = start + ingressDuration
-    const waitingAtGate = Boolean(record.pendingAt && !record.releasedAt && !record.blockedAt && !record.responseStartedAt)
+    const waitingAtGate = Boolean(record.pendingAt && !record.releasedAt && !record.blockedAt && !record.abortedAt && !record.responseStartedAt)
     const forwardStart = Math.max(ingressEnd, (record.releasedAt ?? start) + props.renderDelayMs)
     const forwardEnd = forwardStart + forwardDuration
     const blockedAtGateway = record.action === 'block'
@@ -331,7 +334,9 @@ function render() {
     const responseEnd = visualResponseStart === undefined ? undefined : visualResponseStart + responseDuration
     const trailEnd = responseEnd === undefined ? undefined : responseEnd + props.trailMs
     const terminal = terminalAt(record)
-    if (terminal !== undefined && trailEnd !== undefined && now > trailEnd) {
+    const abortedTrailEnd = record.abortedAt === undefined ? undefined : record.abortedAt + props.renderDelayMs + Math.max(1_000, props.trailMs)
+    const visualEnd = abortedTrailEnd ?? trailEnd
+    if (terminal !== undefined && visualEnd !== undefined && now > visualEnd) {
       removeDynamicParticle(id)
       retired.add(id)
       continue
@@ -341,7 +346,11 @@ function render() {
     let alpha = 1
     let pulse = 0
     if (now < ingressEnd) position = interpolate(points.client, points.gateway, (now - start) / ingressDuration)
-    else if (waitingAtGate) {
+    else if (record.abortedAt !== undefined) {
+      position = points.gateway
+      const fadeStart = record.abortedAt + props.renderDelayMs
+      if (now > fadeStart) alpha = Math.max(0, 1 - (now - fadeStart) / Math.max(1, props.trailMs))
+    } else if (waitingAtGate) {
       position = points.gateway
       pulse = 1
     } else if (visualResponseStart === undefined || now < visualResponseStart) {

@@ -43,13 +43,26 @@ fn setting(name: &str, fallback: &str) -> String {
 
 fn valid_phase(code: u8) -> bool {
     match code {
-        1..=7 => true,
+        1..=8 => true,
         _ => false,
     }
 }
 
 fn valid_frame(frame: &[u8]) -> bool {
     frame.len() >= HEADER_LENGTH && &frame[0..4] == b"HTVP" && frame[4] == 1 && valid_phase(frame[5])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_phase;
+
+    #[test]
+    fn accepts_all_protocol_phases() {
+        assert!(valid_phase(1));
+        assert!(valid_phase(8));
+        assert!(!valid_phase(0));
+        assert!(!valid_phase(9));
+    }
 }
 
 struct Ring {

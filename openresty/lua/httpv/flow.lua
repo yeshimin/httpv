@@ -89,31 +89,54 @@ local function resolve_pending(ctx, subject)
   local pending_key = "pending:" .. ctx.request_id
   local decision_key = "decision:" .. ctx.request_id
   local gate_epoch = dict:get("gate_epoch") or 0
-  dict:set(pending_key, "1")
+  local timeout_ms = tonumber(gate.timeout_ms) or 0
+  local pending_ttl = timeout_ms > 0 and math.max(1, math.ceil(timeout_ms / 1000) + 5) or 0
+  local stored = dict:set(pending_key, "1", pending_ttl)
+  if not stored then
+    emit(ctx, "request_timeout", { action = "block" })
+    return "block"
+  end
+
+  local active = true
+  local function cleanup_pending()
+    if not active then
+      return false
+    end
+    active = false
+    dict:delete(pending_key)
+    dict:delete(decision_key)
+    metrics.pending_exit()
+    return true
+  end
+
   metrics.pending_enter()
   emit(ctx, "request_pending")
 
   local started = ngx.now()
-  local timeout_ms = tonumber(gate.timeout_ms) or 0
+  ngx.on_abort(function()
+    if cleanup_pending() then
+      emit(ctx, "request_aborted", {
+        action = "abort",
+        status = 499,
+        duration_ms = math.max(0, now_ms() - ctx.started_at_ms)
+      })
+    end
+  end)
+
   while true do
     if (dict:get("gate_epoch") or 0) ~= gate_epoch then
-      dict:delete(pending_key)
-      dict:delete(decision_key)
-      metrics.pending_exit()
+      cleanup_pending()
       emit(ctx, "request_decided", { action = "block" })
       return "block"
     end
     local decision = dict:get(decision_key)
     if decision == "allow" or decision == "block" then
-      dict:delete(decision_key)
-      dict:delete(pending_key)
-      metrics.pending_exit()
+      cleanup_pending()
       emit(ctx, "request_decided", { action = decision })
       return decision
     end
     if timeout_ms > 0 and (ngx.now() - started) * 1000 >= timeout_ms then
-      dict:delete(pending_key)
-      metrics.pending_exit()
+      cleanup_pending()
       local action = gate.timeout_action == "allow" and "allow" or "block"
       emit(ctx, "request_timeout", { action = action })
       return action

@@ -27,7 +27,7 @@ const messages: Record<Locale, Record<string, string>> = {
     gateActive: '人工闸门已开启。', gateInstruction: '下一个匹配请求将以黄色粒子暂停，直到你选择放行或阻断。',
     ready: '就绪——运行引导演示以生成一条可见请求。', waitingDecision: '正在等待你的决定——点击黄色粒子，然后选择放行或阻断。',
     flowing: '请求正在流向上游：{method} {path}', returning: '上游已响应——响应正在返回客户端。',
-    completed: '已完成：{status}，耗时 {duration}ms。拖尾会短暂保留。', trafficControls: '流量控制',
+    completed: '已完成：{status}，耗时 {duration}ms。拖尾会短暂保留。', clientAborted: '客户端已断开，请求已经终止。', trafficControls: '流量控制',
     managedPath: '受监管路径', gateTimeout: '闸门超时', timeoutAction: '超时动作', block: '阻断', allow: '放行',
     regulateTraffic: '监管匹配流量', showEvents: '展示事件', render: '绘制 {value}ms', trail: '拖尾 {value}ms', test: '测试 {value}ms',
     selectedRequest: '选中请求', client: '客户端', status: '状态', duration: '耗时', responseSize: '响应大小',
@@ -49,7 +49,7 @@ const messages: Record<Locale, Record<string, string>> = {
     gateActive: 'Manual gate is active.', gateInstruction: 'The next matching request will pause as a yellow particle until you select Allow or Block.',
     ready: 'Ready — run the guided demo to create one visible request.', waitingDecision: 'Waiting for your decision — tap the yellow particle, then Allow or Block.',
     flowing: 'Request flowing to upstream: {method} {path}', returning: 'Upstream has responded — response is returning to the client.',
-    completed: 'Completed: {status} in {duration}ms. Its trail remains visible briefly.', trafficControls: 'Traffic controls',
+    completed: 'Completed: {status} in {duration}ms. Its trail remains visible briefly.', clientAborted: 'The client disconnected and the request has ended.', trafficControls: 'Traffic controls',
     managedPath: 'Managed path', gateTimeout: 'Gate timeout', timeoutAction: 'On timeout', block: 'Block', allow: 'Allow',
     regulateTraffic: 'Regulate matching traffic', showEvents: 'Show events', render: 'Render {value}ms', trail: 'Trail {value}ms', test: 'Test {value}ms',
     selectedRequest: 'Selected request', client: 'Client', status: 'Status', duration: 'Duration', responseSize: 'Response size',
@@ -107,7 +107,7 @@ const selected = computed(() => selectedID.value ? traffic.value.get(selectedID.
 const selectedRecords = computed(() => selectedIds.value.map((id) => traffic.value.get(id)).filter((record): record is TrafficRecord => Boolean(record)))
 const pendingCount = computed(() => records.value.filter(isPendingActive).length)
 function isPendingActive(record: TrafficRecord) {
-  if (!record.pendingAt || record.releasedAt || record.blockedAt || record.finishedAt) return false
+  if (!record.pendingAt || record.releasedAt || record.blockedAt || record.abortedAt || record.finishedAt) return false
   const timeout = subject.value.gate.timeout_ms
   return timeout === 0 || nowMs.value < record.pendingAt + timeout
 }
@@ -128,7 +128,7 @@ const animatedIds = computed(() => {
   const selectedSet = new Set(selectedIds.value)
   const prioritized = [
     ...records.value.filter((record) => selectedSet.has(record.requestId)),
-    ...records.value.filter((record) => record.pendingAt && !record.releasedAt && !record.blockedAt && !record.finishedAt),
+    ...records.value.filter((record) => record.pendingAt && !record.releasedAt && !record.blockedAt && !record.abortedAt && !record.finishedAt),
     ...records.value.slice(-360).reverse()
   ]
   const unique = new Set<string>()
@@ -137,7 +137,7 @@ const animatedIds = computed(() => {
 })
 const selectedPendingLabel = computed(() => {
   const record = selected.value
-  if (!record?.pendingAt || record.releasedAt || record.blockedAt || record.finishedAt) return ''
+  if (!record?.pendingAt || record.releasedAt || record.blockedAt || record.abortedAt || record.finishedAt) return ''
   const timeout = subject.value.gate.timeout_ms
   if (timeout === 0) return t('pendingInfinite')
   const seconds = Math.max(0, Math.ceil((record.pendingAt + timeout - nowMs.value) / 1000))
@@ -153,7 +153,8 @@ const policyLabel = computed(() => {
 const flowStatus = computed(() => {
   const record = latestRecord.value
   if (!record) return t('ready')
-  if (record.pendingAt && !record.releasedAt && !record.blockedAt && !record.finishedAt) return t('waitingDecision')
+  if (record.pendingAt && !record.releasedAt && !record.blockedAt && !record.abortedAt && !record.finishedAt) return t('waitingDecision')
+  if (record.abortedAt) return t('clientAborted')
   if (record.releasedAt && !record.responseStartedAt) return t('allowedForwarding')
   if (!record.responseStartedAt) return t('flowing', { method: record.method, path: record.path })
   if (!record.finishedAt) return t('returning')
@@ -187,6 +188,12 @@ function applyEventToMap(event: EventMessage, target: Map<string, TrafficRecord>
     if (event.status) record.status = event.status
   }
   if (event.phase === 'request_decided' && event.action === 'allow') record.releasedAt = event.timestamp_ms
+  if (event.phase === 'request_aborted') {
+    record.action = 'abort'
+    record.abortedAt = event.timestamp_ms
+    record.status = event.status ?? 499
+    record.durationMs = event.duration_ms
+  }
   if ((event.phase === 'request_decided' || event.phase === 'request_blocked' || event.phase === 'request_timeout') && event.action === 'block') {
     record.blockedAt = event.timestamp_ms
   }
@@ -206,16 +213,21 @@ function enqueueEvent(event: EventMessage) {
   if (eventFrame === undefined) eventFrame = window.requestAnimationFrame(flushEvents)
 }
 
+function recordVisualEnd(record: TrafficRecord) {
+  const terminalAt = record.finishedAt
+    ?? (record.action === 'block' ? record.blockedAt : undefined)
+    ?? record.abortedAt
+  if (terminalAt === undefined) return undefined
+  return terminalAt + renderDelayMs.value + 420 + Math.max(1_000, trailMs.value)
+}
+
 function pruneExpiredRecords() {
   const next = new Map(traffic.value)
   let changed = false
   for (const [id, record] of next) {
-    const unresolved = Boolean(record.pendingAt && !record.releasedAt && !record.blockedAt && !record.finishedAt)
-    const blockedWithoutFinish = record.action === 'block' && record.blockedAt !== undefined && record.finishedAt === undefined
-    const blockedVisualEnd = blockedWithoutFinish
-      ? record.blockedAt! + renderDelayMs.value + 420 + Math.max(1_000, trailMs.value)
-      : undefined
-    if ((unresolved && !isPendingActive(record)) || (blockedVisualEnd !== undefined && nowMs.value > blockedVisualEnd)) {
+    const unresolved = Boolean(record.pendingAt && !record.releasedAt && !record.blockedAt && !record.abortedAt && !record.finishedAt)
+    const terminalVisualEnd = recordVisualEnd(record)
+    if ((unresolved && !isPendingActive(record)) || (terminalVisualEnd !== undefined && nowMs.value > terminalVisualEnd)) {
       next.delete(id)
       changed = true
     }
@@ -246,7 +258,8 @@ async function bootstrap() {
   const cutoff = Date.now() - 15_000
   for (const [id, record] of next) {
     const keepPending = isPendingActive(record)
-    if (!keepPending && record.startedAt < cutoff) next.delete(id)
+    const visualEnd = recordVisualEnd(record)
+    if (!keepPending && ((visualEnd !== undefined && Date.now() > visualEnd) || (visualEnd === undefined && record.startedAt < cutoff))) next.delete(id)
   }
   traffic.value = next
 }
@@ -478,7 +491,7 @@ onBeforeUnmount(() => {
             <div><dt>{{ t('responseSize') }}</dt><dd>{{ selected.responseBytes === undefined ? t('inFlight') : `${selected.responseBytes} bytes` }}</dd></div>
           </dl>
           <div class="actions">
-            <p v-if="selected.pendingAt && !selected.releasedAt && !selected.blockedAt && !selected.finishedAt" class="pending-countdown" :class="{ expired: !selectedPendingActive }">{{ selectedPendingActive ? selectedPendingLabel : t('decisionExpired') }}</p>
+            <p v-if="selected.pendingAt && !selected.releasedAt && !selected.blockedAt && !selected.abortedAt && !selected.finishedAt" class="pending-countdown" :class="{ expired: !selectedPendingActive }">{{ selectedPendingActive ? selectedPendingLabel : t('decisionExpired') }}</p>
             <button :disabled="!selectedPendingActive" class="allow" @click="decide('allow')">{{ t('allowPending') }}</button>
             <button :disabled="!selectedPendingActive" class="block" @click="decide('block')">{{ t('blockPending') }}</button>
             <button class="outline" @click="blockPath">{{ t('blockFuture') }}</button>
