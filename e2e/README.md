@@ -14,4 +14,6 @@ The suite checks canvas layout, native policy activation, configuration
 validation, hot route selection, timeout and manual blocking, and overload
 aggregation. It also enables synthetic Viewer, Operator, and Admin tokens to
 verify the login page, Cookie session, CSRF enforcement, RBAC, and audit log.
+Opt-in request detail tests verify header redaction, bounded request/response
+body capture, the admin detail API, and the console Header/Body tabs.
 The isolated console uses `http://127.0.0.1:15173`.

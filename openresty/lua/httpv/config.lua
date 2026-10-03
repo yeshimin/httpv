@@ -19,7 +19,19 @@ local default_config = {
       enabled = true,
       display = true,
       match = { path_prefix = "/" },
-      gate = { enabled = false, timeout_ms = 30000, timeout_action = "block" }
+      gate = { enabled = false, timeout_ms = 30000, timeout_action = "block", max_pending = 2000, overflow_action = "block", failure_action = "allow" },
+      capture = {
+        enabled = false,
+        request_headers = true,
+        response_headers = true,
+        request_body = false,
+        response_body = false,
+        max_body_bytes = 16384,
+        ttl_seconds = 60,
+        sample_rate = 1,
+        content_types = { "application/json", "application/x-www-form-urlencoded", "application/xml", "text/" },
+        redact_headers = { "authorization", "cookie", "set-cookie", "proxy-authorization", "x-api-key" }
+      }
     }
   },
   rules = {}

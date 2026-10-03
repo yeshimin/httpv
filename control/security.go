@@ -181,6 +181,9 @@ func requiredRole(r *http.Request) Role {
 	if r.URL.Path == "/api/auth/logout" {
 		return RoleViewer
 	}
+	if strings.HasPrefix(r.URL.Path, "/api/requests/") {
+		return RoleAdmin
+	}
 	if r.Method == http.MethodGet {
 		if strings.HasPrefix(r.URL.Path, "/api/audit") {
 			return RoleAdmin

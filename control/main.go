@@ -10,6 +10,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -44,12 +45,26 @@ type Gate struct {
 }
 
 type Subject struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Enabled bool   `json:"enabled"`
-	Display bool   `json:"display"`
-	Match   Match  `json:"match"`
-	Gate    Gate   `json:"gate"`
+	ID      string        `json:"id"`
+	Name    string        `json:"name"`
+	Enabled bool          `json:"enabled"`
+	Display bool          `json:"display"`
+	Match   Match         `json:"match"`
+	Gate    Gate          `json:"gate"`
+	Capture CapturePolicy `json:"capture"`
+}
+
+type CapturePolicy struct {
+	Enabled         bool     `json:"enabled"`
+	RequestHeaders  bool     `json:"request_headers"`
+	ResponseHeaders bool     `json:"response_headers"`
+	RequestBody     bool     `json:"request_body"`
+	ResponseBody    bool     `json:"response_body"`
+	MaxBodyBytes    int64    `json:"max_body_bytes"`
+	TTLSeconds      int64    `json:"ttl_seconds"`
+	SampleRate      float64  `json:"sample_rate"`
+	ContentTypes    []string `json:"content_types"`
+	RedactHeaders   []string `json:"redact_headers"`
 }
 
 type Upstream struct {
@@ -510,6 +525,27 @@ func (c *OpenRestyClient) blockAllPending() error {
 	return nil
 }
 
+func (c *OpenRestyClient) requestDetails(requestID string) (any, error) {
+	req, err := http.NewRequest(http.MethodGet, c.baseURL+"/internal/details/"+url.PathEscape(requestID), nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return nil, &httpError{status: resp.StatusCode}
+	}
+	var details any
+	decoder := json.NewDecoder(io.LimitReader(resp.Body, 3<<20))
+	if err := decoder.Decode(&details); err != nil {
+		return nil, err
+	}
+	return details, nil
+}
+
 type httpError struct{ status int }
 
 func (e *httpError) Error() string { return http.StatusText(e.status) }
@@ -789,6 +825,20 @@ func main() {
 	})
 	r.Get("/api/audit", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"entries": audit.recent(auditLimit(r))})
+	})
+	r.Get("/api/requests/{id}/details", func(w http.ResponseWriter, r *http.Request) {
+		requestID := chi.URLParam(r, "id")
+		details, err := openresty.requestDetails(requestID)
+		if err != nil {
+			status := http.StatusBadGateway
+			if failure, ok := err.(*httpError); ok && failure.status == http.StatusNotFound {
+				status = http.StatusNotFound
+			}
+			writeJSON(w, status, map[string]string{"error": "request details are unavailable"})
+			return
+		}
+		audit.record(r, "details.read", requestID, "success")
+		writeJSON(w, http.StatusOK, details)
 	})
 	r.Get("/api/ws", hub.serveWS)
 	r.Get("/api/bootstrap", func(w http.ResponseWriter, r *http.Request) {

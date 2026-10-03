@@ -38,6 +38,18 @@
         "max_pending": 2000,
         "overflow_action": "block",
         "failure_action": "allow"
+      },
+      "capture": {
+        "enabled": false,
+        "request_headers": true,
+        "response_headers": true,
+        "request_body": false,
+        "response_body": false,
+        "max_body_bytes": 16384,
+        "ttl_seconds": 60,
+        "sample_rate": 1,
+        "content_types": ["application/json", "application/x-www-form-urlencoded", "application/xml", "text/"],
+        "redact_headers": ["authorization", "cookie", "set-cookie", "proxy-authorization", "x-api-key"]
       }
     }
   ],

@@ -53,3 +53,6 @@ OIDC, user identities, external session storage, TLS termination, control-plane
 mTLS, and multi-node audit aggregation remain future work. Put the console
 behind TLS before exposing it outside localhost.
 
+Captured request details are restricted to the admin role. Every successful
+detail read is written to the audit log. Header redaction is enforced in
+OpenResty before data is stored or returned to Control.

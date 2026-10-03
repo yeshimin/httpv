@@ -70,6 +70,18 @@ def subject(gate_enabled=False, timeout_ms=30_000, timeout_action="block", max_p
             "overflow_action": overflow_action,
             "failure_action": failure_action,
         },
+        "capture": {
+            "enabled": False,
+            "request_headers": True,
+            "response_headers": True,
+            "request_body": False,
+            "response_body": False,
+            "max_body_bytes": 16384,
+            "ttl_seconds": 60,
+            "sample_rate": 1,
+            "content_types": ["application/json", "application/x-www-form-urlencoded", "application/xml", "text/"],
+            "redact_headers": ["authorization", "cookie", "set-cookie", "proxy-authorization", "x-api-key"],
+        },
     }
 
 
@@ -155,6 +167,70 @@ class ConsoleE2E(unittest.TestCase):
             self.assertEqual(response.headers.get("X-HTTPV-Demo"), "upstream")
         self.assertEqual(payload["path"], "/orders/42")
         self.assertEqual(payload["delay_ms"], 0)
+
+    def test_opt_in_detail_capture_redacts_sensitive_headers(self):
+        captured_subject = subject()
+        captured_subject["capture"].update({"enabled": True, "request_body": True, "response_body": True, "max_body_bytes": 4096})
+        api("PUT", "/api/subjects/default", captured_subject)
+        started_at = int(time.time() * 1000)
+        request = Request(
+            f"{GATEWAY_URL}/capture-test?ms=0",
+            data=b'{"hello":"world"}',
+            method="POST",
+            headers={"Content-Type": "application/json", "Authorization": "Bearer synthetic-secret", "X-HTTPV-Test": "visible"},
+        )
+        with urlopen(request, timeout=5) as response:
+            self.assertEqual(response.status, 200)
+
+        request_id = None
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            _, raw = api("GET", "/api/events")
+            for event in reversed(json.loads(raw)):
+                if event.get("phase") == "request_started" and event.get("method") == "POST" and event.get("path") == "/capture-test" and event.get("timestamp_ms", 0) >= started_at:
+                    request_id = event["request_id"]
+                    break
+            if request_id:
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(request_id)
+
+        _, raw = api("GET", f"/api/requests/{request_id}/details")
+        details = json.loads(raw)
+        request_headers = {name.lower(): value for name, value in details["request"]["headers"].items()}
+        response_headers = {name.lower(): value for name, value in details["response"]["headers"].items()}
+        self.assertEqual(request_headers["authorization"], "[REDACTED]")
+        self.assertEqual(request_headers["x-httpv-test"], "visible")
+        self.assertEqual(details["request"]["body"], '{"hello":"world"}')
+        self.assertEqual(response_headers["x-httpv-demo"], "upstream")
+        self.assertIn('"path":"/capture-test"', details["response"]["body"].replace(" ", ""))
+        self.assertNotIn("synthetic-secret", raw.decode())
+
+
+    def test_detail_capture_renders_in_console(self):
+        captured_subject = subject()
+        captured_subject["capture"].update({"enabled": True, "response_body": True})
+        api("PUT", "/api/subjects/default", captured_subject)
+        self.page.reload(wait_until="networkidle")
+        expect(self.page.locator(".status.live")).to_be_visible(timeout=10_000)
+        trail = self.page.locator('.slider-row input[type="range"]').nth(1)
+        trail.evaluate("node => { node.value = '10000'; node.dispatchEvent(new Event('input', { bubbles: true })) }")
+        self.page.get_by_role("button", name=re.compile("发送当前请求|Send current request")).click()
+        self.page.wait_for_timeout(900)
+        canvas = self.page.locator(".traffic-canvas")
+        box = canvas.bounding_box()
+        selected = False
+        if box:
+            for offset in range(35, int(box["height"]) - 15, 8):
+                self.page.mouse.click(box["x"] + box["width"] * 0.05, box["y"] + offset)
+                if self.page.locator(".detail-tabs").count() > 0:
+                    selected = True
+                    break
+        self.assertTrue(selected, "captured request could not be selected from the canvas")
+        self.page.get_by_role("button", name=re.compile("Header|Headers")).click()
+        expect(self.page.locator(".capture-grid")).to_contain_text(re.compile("x-httpv-demo|X-HTTPV-Demo"), timeout=5_000)
+        self.page.get_by_role("button", name="Body", exact=True).click()
+        expect(self.page.locator(".capture-grid")).to_contain_text('"ok":true', timeout=5_000)
 
     def test_config_validates_multiple_routes(self):
         _, raw = api("GET", "/api/config")

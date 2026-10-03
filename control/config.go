@@ -41,9 +41,56 @@ func defaultGatewayConfig() GatewayConfig {
 		Subjects: []Subject{{
 			ID: "default", Name: "Default traffic", Enabled: true, Display: true,
 			Match: Match{PathPrefix: "/"}, Gate: Gate{Enabled: false, TimeoutMS: 30_000, TimeoutAction: "block", MaxPending: 2_000, OverflowAction: "block", FailureAction: "allow"},
+			Capture: defaultCapturePolicy(),
 		}},
 		Rules: []Rule{},
 	}
+}
+
+func defaultCapturePolicy() CapturePolicy {
+	return CapturePolicy{
+		RequestHeaders: true, ResponseHeaders: true, MaxBodyBytes: 16 * 1024, TTLSeconds: 60, SampleRate: 1,
+		ContentTypes:  []string{"application/json", "application/x-www-form-urlencoded", "application/xml", "text/"},
+		RedactHeaders: []string{"authorization", "cookie", "set-cookie", "proxy-authorization", "x-api-key"},
+	}
+}
+
+func normalizeCapturePolicy(policy CapturePolicy) CapturePolicy {
+	defaults := defaultCapturePolicy()
+	if !policy.RequestHeaders && !policy.ResponseHeaders && !policy.RequestBody && !policy.ResponseBody {
+		policy.RequestHeaders = true
+		policy.ResponseHeaders = true
+	}
+	if policy.MaxBodyBytes <= 0 {
+		policy.MaxBodyBytes = defaults.MaxBodyBytes
+	}
+	if policy.TTLSeconds <= 0 {
+		policy.TTLSeconds = defaults.TTLSeconds
+	}
+	if policy.SampleRate <= 0 {
+		policy.SampleRate = defaults.SampleRate
+	}
+	if len(policy.ContentTypes) == 0 {
+		policy.ContentTypes = append([]string{}, defaults.ContentTypes...)
+	}
+	redacted := map[string]struct{}{}
+	policy.RedactHeaders = append(policy.RedactHeaders, defaults.RedactHeaders...)
+	normalizedHeaders := make([]string, 0, len(policy.RedactHeaders))
+	for _, header := range policy.RedactHeaders {
+		header = strings.ToLower(strings.TrimSpace(header))
+		if header == "" {
+			continue
+		}
+		if _, exists := redacted[header]; !exists {
+			redacted[header] = struct{}{}
+			normalizedHeaders = append(normalizedHeaders, header)
+		}
+	}
+	policy.RedactHeaders = normalizedHeaders
+	for index := range policy.ContentTypes {
+		policy.ContentTypes[index] = strings.ToLower(strings.TrimSpace(policy.ContentTypes[index]))
+	}
+	return policy
 }
 
 func cloneGatewayConfig(config GatewayConfig) GatewayConfig {
@@ -108,6 +155,7 @@ func normalizeGatewayConfig(config GatewayConfig) GatewayConfig {
 		if subject.Gate.FailureAction != "allow" && subject.Gate.FailureAction != "block" {
 			subject.Gate.FailureAction = "allow"
 		}
+		subject.Capture = normalizeCapturePolicy(subject.Capture)
 	}
 	for index := range config.Rules {
 		rule := &config.Rules[index]
@@ -198,6 +246,15 @@ func validateGatewayConfig(config GatewayConfig) error {
 		}
 		if subject.Gate.FailureAction != "allow" && subject.Gate.FailureAction != "block" {
 			return fmt.Errorf("subject %q has an invalid failure action", subject.ID)
+		}
+		if subject.Capture.MaxBodyBytes < 1 || subject.Capture.MaxBodyBytes > 1<<20 {
+			return fmt.Errorf("subject %q capture body limit must be between 1 and 1048576 bytes", subject.ID)
+		}
+		if subject.Capture.TTLSeconds < 1 || subject.Capture.TTLSeconds > 3600 {
+			return fmt.Errorf("subject %q capture TTL must be between 1 and 3600 seconds", subject.ID)
+		}
+		if subject.Capture.SampleRate <= 0 || subject.Capture.SampleRate > 1 {
+			return fmt.Errorf("subject %q capture sample rate must be greater than 0 and at most 1", subject.ID)
 		}
 		subjects[subject.ID] = struct{}{}
 	}
@@ -313,6 +370,7 @@ func (s *Store) updateSubject(subject Subject) Subject {
 	if subject.Gate.FailureAction != "allow" && subject.Gate.FailureAction != "block" {
 		subject.Gate.FailureAction = "allow"
 	}
+	subject.Capture = normalizeCapturePolicy(subject.Capture)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for index := range s.gateway.Subjects {

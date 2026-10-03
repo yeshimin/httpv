@@ -1,4 +1,5 @@
 local config = require "httpv.config"
+local details = require "httpv.details"
 local metrics = require "httpv.metrics"
 local publisher = require "httpv.publisher"
 
@@ -216,6 +217,7 @@ local function resolve_pending(ctx, subject)
   ngx.on_abort(function()
     if cleanup_pending() then
       metrics.increment("gate_client_abort_total")
+      details.abort(ctx)
       emit(ctx, "request_aborted", {
         action = "abort",
         status = 499,
@@ -284,6 +286,7 @@ function _M.access()
     started_at_ms = now_ms()
   }
   ngx.ctx.httpv = ctx
+  details.begin(ctx, subject)
   metrics.increment("managed_requests_total")
   emit(ctx, "request_started")
 
@@ -312,7 +315,15 @@ function _M.response_started()
   if not ctx then
     return
   end
+  details.response_started(ctx)
   emit(ctx, "response_started", { status = ngx.status })
+end
+
+function _M.response_body()
+  if ngx.var.httpv_native_fast_path == "1" then
+    return
+  end
+  details.response_body(ngx.ctx.httpv, ngx.arg[1])
 end
 
 function _M.response_finished()
@@ -323,11 +334,14 @@ function _M.response_finished()
   if not ctx then
     return
   end
+  local status = tonumber(ngx.var.status) or ngx.status
+  local duration_ms = math.max(0, now_ms() - ctx.started_at_ms)
+  details.finish(ctx, status, duration_ms)
   metrics.increment("responses_total")
   emit(ctx, "response_finished", {
-    status = tonumber(ngx.var.status) or ngx.status,
+    status = status,
     response_bytes = tonumber(ngx.var.body_bytes_sent) or 0,
-    duration_ms = math.max(0, now_ms() - ctx.started_at_ms)
+    duration_ms = duration_ms
   })
 end
 

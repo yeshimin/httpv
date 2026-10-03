@@ -1,5 +1,6 @@
 local cjson = require "cjson.safe"
 local config = require "httpv.config"
+local details = require "httpv.details"
 
 local _M = {}
 
@@ -61,6 +62,14 @@ end
 function _M.block_all_pending()
   local epoch = ngx.shared.httpv_pending:incr("gate_epoch", 1, 0)
   return json(ngx.HTTP_OK, { epoch = epoch })
+end
+
+function _M.details(request_id)
+  local payload = details.get(request_id)
+  if not payload then
+    return json(ngx.HTTP_NOT_FOUND, { error = "request details are unavailable" })
+  end
+  return json(ngx.HTTP_OK, payload)
 end
 
 return _M

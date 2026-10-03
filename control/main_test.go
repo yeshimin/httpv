@@ -290,6 +290,21 @@ func TestGatewayConfigValidatesGateProtection(t *testing.T) {
 	}
 }
 
+func TestGatewayConfigValidatesCapturePolicy(t *testing.T) {
+	config := defaultGatewayConfig()
+	config.Subjects[0].Capture.Enabled = true
+	config.Subjects[0].Capture.MaxBodyBytes = (1 << 20) + 1
+	if err := validateGatewayConfig(normalizeGatewayConfig(config)); err == nil {
+		t.Fatal("expected an oversized capture body limit validation error")
+	}
+	config = defaultGatewayConfig()
+	config.Subjects[0].Capture = CapturePolicy{}
+	normalized := normalizeGatewayConfig(config)
+	if normalized.Subjects[0].Capture.MaxBodyBytes != 16*1024 || !normalized.Subjects[0].Capture.RequestHeaders || !normalized.Subjects[0].Capture.ResponseHeaders {
+		t.Fatalf("capture defaults were not applied: %#v", normalized.Subjects[0].Capture)
+	}
+}
+
 func TestNativePolicyDisablesMultiSubjectConfiguration(t *testing.T) {
 	config := defaultGatewayConfig()
 	config.Subjects = append(config.Subjects, Subject{ID: "second", Enabled: true, Display: true, Match: Match{PathPrefix: "/second"}, Gate: Gate{TimeoutAction: "block"}})
@@ -299,6 +314,18 @@ func TestNativePolicyDisablesMultiSubjectConfiguration(t *testing.T) {
 	}
 	if policy[5] != 0 || binary.BigEndian.Uint16(policy[8:10]) != 0 {
 		t.Fatalf("multi-subject policy must fall back to Lua: header=%v", policy[:nativePolicyHeaderLen])
+	}
+}
+
+func TestNativePolicyFallsBackWhenCaptureIsEnabled(t *testing.T) {
+	config := defaultGatewayConfig()
+	config.Subjects[0].Capture.Enabled = true
+	policy, err := encodeNativePolicy(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy[5] != 0 {
+		t.Fatalf("capture-enabled policy must fall back to Lua: header=%v", policy[:nativePolicyHeaderLen])
 	}
 }
 

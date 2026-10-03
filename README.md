@@ -14,7 +14,8 @@ The repository now includes a Rust edge agent between OpenResty and the control 
 
 Read [the architecture](docs/architecture.md), [configuration](docs/configuration.md),
 [deployment guide](docs/deployment.md), [integration guide](docs/integration.md),
-[security baseline](docs/security.md), and [performance contract](docs/performance-contract.md)
+[security baseline](docs/security.md), [detail capture](docs/detail-capture.md),
+and [performance contract](docs/performance-contract.md)
 before making data-path changes.
 
 ## Adaptive visualization

@@ -4,7 +4,8 @@ import TrafficCanvas, { type TrafficRecord } from './TrafficCanvas.vue'
 
 type Match = { host: string; path_prefix: string; method: string }
 type Gate = { enabled: boolean; timeout_ms: number; timeout_action: 'allow' | 'block'; max_pending: number; overflow_action: 'allow' | 'block' | 'reject'; failure_action: 'allow' | 'block' }
-type Subject = { id: string; name: string; enabled: boolean; display: boolean; match: Match; gate: Gate }
+type CapturePolicy = { enabled: boolean; request_headers: boolean; response_headers: boolean; request_body: boolean; response_body: boolean; max_body_bytes: number; ttl_seconds: number; sample_rate: number; content_types: string[]; redact_headers: string[] }
+type Subject = { id: string; name: string; enabled: boolean; display: boolean; match: Match; gate: Gate; capture: CapturePolicy }
 type Upstream = { id: string; name: string; url: string; host_header: string }
 type Route = { id: string; name: string; enabled: boolean; match: Match; upstream_id: string }
 type Rule = { id: string; subject_id?: string; action: string; path_prefix: string; method: string; client_ip: string; created_at: number }
@@ -19,6 +20,8 @@ type TrafficSummary = {
 }
 type NativePolicyStatus = { version: number; state: 'active' | 'pending' | 'unpublished' | 'disabled'; mode?: 'native' | 'lua_fallback' | 'disabled'; acks: { worker: string; version: number }[] }
 type AuthStatus = { enabled: boolean; authenticated: boolean; role?: 'viewer' | 'operator' | 'admin'; csrf_token?: string }
+type CapturedSide = { headers?: Record<string, unknown>; body?: string; truncated?: boolean; content_type?: string; body_unavailable?: string; status?: number }
+type RequestDetails = { request_id: string; subject_id: string; captured_at: number; finished_at?: number; duration_ms?: number; request: CapturedSide; response: CapturedSide }
 
 type Locale = 'zh' | 'en'
 const messages: Record<Locale, Record<string, string>> = {
@@ -47,7 +50,8 @@ const messages: Record<Locale, Record<string, string>> = {
     requestId: '请求 ID', subject: '监管对象', requestSize: '请求大小', started: '开始时间', finished: '完成时间',
     requestHeaders: '请求 Header', responseHeaders: '响应 Header', requestBody: '请求 Body', responseBody: '响应 Body',
     captureOff: '内容采集尚未开启。后续将按规则限长、脱敏并默认关闭。', managedSubject: '监管对象', topology: '{routes} 条路由 · {upstreams} 个上游',
-    signIn: '登录 HTTPV', accessToken: '访问 Token', signInAction: '登录', invalidToken: 'Token 无效或登录失败', signOut: '退出', roleViewer: '只读', roleOperator: '操作员', roleAdmin: '管理员'
+    signIn: '登录 HTTPV', accessToken: '访问 Token', signInAction: '登录', invalidToken: 'Token 无效或登录失败', signOut: '退出', roleViewer: '只读', roleOperator: '操作员', roleAdmin: '管理员',
+    captureSettings: '详情采集', captureEnabled: '开启采集', captureRequestHeaders: '请求 Header', captureResponseHeaders: '响应 Header', captureRequestBody: '请求 Body', captureResponseBody: '响应 Body', captureLimit: 'Body 上限', captureTTL: '保留秒数', captureSample: '采样率', captureSensitive: '采集内容可能包含敏感数据；强制脱敏鉴权与 Cookie Header。', captureLoading: '正在读取详情…', captureUnavailable: '该请求未采集详情、已过期或当前角色无权读取。', captureTruncated: '内容已截断'
   },
   en: {
     commandSurface: 'Traffic command surface', connecting: 'connecting', live: 'live', closed: 'closed',
@@ -74,14 +78,16 @@ const messages: Record<Locale, Record<string, string>> = {
     requestId: 'Request ID', subject: 'Subject', requestSize: 'Request size', started: 'Started', finished: 'Finished',
     requestHeaders: 'Request headers', responseHeaders: 'Response headers', requestBody: 'Request body', responseBody: 'Response body',
     captureOff: 'Content capture is not enabled. It will be opt-in, size-limited, and redacted.', managedSubject: 'Managed subject', topology: '{routes} routes · {upstreams} upstreams',
-    signIn: 'Sign in to HTTPV', accessToken: 'Access token', signInAction: 'Sign in', invalidToken: 'Invalid token or sign-in failed', signOut: 'Sign out', roleViewer: 'viewer', roleOperator: 'operator', roleAdmin: 'admin'
+    signIn: 'Sign in to HTTPV', accessToken: 'Access token', signInAction: 'Sign in', invalidToken: 'Invalid token or sign-in failed', signOut: 'Sign out', roleViewer: 'viewer', roleOperator: 'operator', roleAdmin: 'admin',
+    captureSettings: 'Detail capture', captureEnabled: 'Enable capture', captureRequestHeaders: 'Request headers', captureResponseHeaders: 'Response headers', captureRequestBody: 'Request body', captureResponseBody: 'Response body', captureLimit: 'Body limit', captureTTL: 'Retention seconds', captureSample: 'Sample rate', captureSensitive: 'Captured content may be sensitive; authentication and cookie headers are always redacted.', captureLoading: 'Loading details…', captureUnavailable: 'Details were not captured, have expired, or are not available to this role.', captureTruncated: 'Content truncated'
   }
 }
 
 const subject = ref<Subject>({
   id: 'default', name: 'Default traffic', enabled: true, display: true,
   match: { host: '', path_prefix: '/', method: '' },
-  gate: { enabled: false, timeout_ms: 30000, timeout_action: 'block', max_pending: 2000, overflow_action: 'block', failure_action: 'allow' }
+  gate: { enabled: false, timeout_ms: 30000, timeout_action: 'block', max_pending: 2000, overflow_action: 'block', failure_action: 'allow' },
+  capture: { enabled: false, request_headers: true, response_headers: true, request_body: false, response_body: false, max_body_bytes: 16384, ttl_seconds: 60, sample_rate: 1, content_types: ['application/json', 'application/x-www-form-urlencoded', 'application/xml', 'text/'], redact_headers: ['authorization', 'cookie', 'set-cookie', 'proxy-authorization', 'x-api-key'] }
 })
 const subjects = ref<Subject[]>([])
 const upstreams = ref<Upstream[]>([])
@@ -104,7 +110,11 @@ const authReady = ref(false)
 const csrfToken = ref('')
 const loginToken = ref('')
 const loginError = ref('')
+const requestDetails = ref<RequestDetails>()
+const detailsLoading = ref(false)
+const detailsError = ref('')
 const timeoutEventGraceMs = 2_000
+const selectedDetailRetentionMs = 60_000
 let socket: WebSocket | undefined
 let clockTimer: number | undefined
 let policyTimer: number | undefined
@@ -265,7 +275,8 @@ function recordVisualEnd(record: TrafficRecord) {
     ?? record.blockedAt
     ?? record.abortedAt
   if (terminalAt === undefined) return undefined
-  return terminalAt + renderDelayMs.value + 420 + Math.max(1_000, trailMs.value)
+  const retention = selectedID.value === record.requestId ? selectedDetailRetentionMs : Math.max(1_000, trailMs.value)
+  return terminalAt + renderDelayMs.value + 420 + retention
 }
 
 function pruneExpiredRecords() {
@@ -371,15 +382,58 @@ async function decide(action: 'allow' | 'block') {
 
 function selectOne(record: TrafficRecord) {
   detailTab.value = 'overview'
+  requestDetails.value = undefined
+  detailsError.value = ''
   selectedID.value = record.requestId
   selectedIds.value = [record.requestId]
 }
 
 function selectMany(records: TrafficRecord[]) {
   detailTab.value = 'overview'
+  requestDetails.value = undefined
+  detailsError.value = ''
   const ids = [...new Set(records.map((record) => record.requestId))]
   selectedIds.value = ids
   selectedID.value = ids.length === 1 ? ids[0] : undefined
+}
+
+async function loadRequestDetails() {
+  if (!selected.value || requestDetails.value?.request_id === selected.value.requestId || detailsLoading.value) return
+  if (!canAdmin.value) {
+    detailsError.value = t('captureUnavailable')
+    return
+  }
+  const requestID = selected.value.requestId
+  detailsLoading.value = true
+  detailsError.value = ''
+  try {
+    const response = await apiFetch(`/api/requests/${encodeURIComponent(requestID)}/details`)
+    if (!response.ok) {
+      detailsError.value = t('captureUnavailable')
+      return
+    }
+    const payload = await response.json() as RequestDetails
+    if (selected.value?.requestId === requestID) requestDetails.value = payload
+  } catch {
+    detailsError.value = t('captureUnavailable')
+  } finally {
+    detailsLoading.value = false
+  }
+}
+
+function setDetailTab(tab: 'overview' | 'headers' | 'body') {
+  detailTab.value = tab
+  if (tab !== 'overview') void loadRequestDetails()
+}
+
+function formatCapturedHeaders(headers?: Record<string, unknown>) {
+  if (!headers) return t('captureUnavailable')
+  return JSON.stringify(headers, null, 2)
+}
+
+function formatCapturedBody(side?: CapturedSide) {
+  if (!side?.body) return side?.body_unavailable ? `${t('captureUnavailable')} (${side.body_unavailable})` : t('captureUnavailable')
+  return side.truncated ? `${side.body}\n\n[${t('captureTruncated')}]` : side.body
 }
 
 async function decideSelected(action: 'allow' | 'block') {
@@ -600,6 +654,22 @@ onBeforeUnmount(() => {
             <label class="switch"><input v-model="subject.enabled" :disabled="!canAdmin" type="checkbox" @change="saveSubject" /><span>{{ t('regulateTraffic') }}</span></label>
             <label class="switch"><input v-model="subject.display" :disabled="!canAdmin" type="checkbox" @change="saveSubject" /><span>{{ t('showEvents') }}</span></label>
           </div>
+          <details class="capture-config">
+            <summary>{{ t('captureSettings') }}</summary>
+            <div class="capture-switches">
+              <label class="switch"><input v-model="subject.capture.enabled" :disabled="!canAdmin" type="checkbox" @change="saveSubject" /><span>{{ t('captureEnabled') }}</span></label>
+              <label class="switch"><input v-model="subject.capture.request_headers" :disabled="!canAdmin" type="checkbox" @change="saveSubject" /><span>{{ t('captureRequestHeaders') }}</span></label>
+              <label class="switch"><input v-model="subject.capture.response_headers" :disabled="!canAdmin" type="checkbox" @change="saveSubject" /><span>{{ t('captureResponseHeaders') }}</span></label>
+              <label class="switch"><input v-model="subject.capture.request_body" :disabled="!canAdmin" type="checkbox" @change="saveSubject" /><span>{{ t('captureRequestBody') }}</span></label>
+              <label class="switch"><input v-model="subject.capture.response_body" :disabled="!canAdmin" type="checkbox" @change="saveSubject" /><span>{{ t('captureResponseBody') }}</span></label>
+            </div>
+            <div class="capture-policy-fields">
+              <label><span>{{ t('captureLimit') }}</span><input v-model.number="subject.capture.max_body_bytes" :disabled="!canAdmin" min="1" max="1048576" step="1024" type="number" @change="saveSubject" /></label>
+              <label><span>{{ t('captureTTL') }}</span><input v-model.number="subject.capture.ttl_seconds" :disabled="!canAdmin" min="1" max="3600" step="10" type="number" @change="saveSubject" /></label>
+              <label><span>{{ t('captureSample') }}</span><input v-model.number="subject.capture.sample_rate" :disabled="!canAdmin" min="0.01" max="1" step="0.05" type="number" @change="saveSubject" /></label>
+            </div>
+            <p class="capture-warning">{{ t('captureSensitive') }}</p>
+          </details>
           <div class="slider-row">
             <label><span>{{ t('render', { value: renderDelayMs }) }}</span><input v-model.number="renderDelayMs" min="0" max="10000" step="25" type="range" /></label>
             <label><span>{{ t('trail', { value: trailMs }) }}</span><input v-model.number="trailMs" min="100" max="10000" step="100" type="range" /></label>
@@ -611,9 +681,9 @@ onBeforeUnmount(() => {
         <template v-if="selected">
           <div class="request-title"><b>{{ selected.method }}</b><code>{{ selected.path }}</code></div>
           <nav class="detail-tabs">
-            <button :class="{ active: detailTab === 'overview' }" @click="detailTab = 'overview'">{{ t('overview') }}</button>
-            <button :class="{ active: detailTab === 'headers' }" @click="detailTab = 'headers'">{{ t('headers') }}</button>
-            <button :class="{ active: detailTab === 'body' }" @click="detailTab = 'body'">{{ t('body') }}</button>
+            <button :class="{ active: detailTab === 'overview' }" @click="setDetailTab('overview')">{{ t('overview') }}</button>
+            <button :class="{ active: detailTab === 'headers' }" @click="setDetailTab('headers')">{{ t('headers') }}</button>
+            <button :class="{ active: detailTab === 'body' }" @click="setDetailTab('body')">{{ t('body') }}</button>
           </nav>
           <dl v-if="detailTab === 'overview'" class="metadata-grid">
             <div><dt>{{ t('requestId') }}</dt><dd class="mono">{{ selected.requestId }}</dd></div>
@@ -625,8 +695,10 @@ onBeforeUnmount(() => {
             <div><dt>{{ t('duration') }}</dt><dd>{{ selected.durationMs === undefined ? t('inFlight') : `${selected.durationMs} ms` }}</dd></div>
             <div><dt>{{ t('responseSize') }}</dt><dd>{{ selected.responseBytes === undefined ? t('inFlight') : `${selected.responseBytes} B` }}</dd></div>
           </dl>
-          <div v-else-if="detailTab === 'headers'" class="capture-grid"><section><b>{{ t('requestHeaders') }}</b><pre>{{ t('captureOff') }}</pre></section><section><b>{{ t('responseHeaders') }}</b><pre>{{ t('captureOff') }}</pre></section></div>
-          <div v-else class="capture-grid"><section><b>{{ t('requestBody') }}</b><pre>{{ t('captureOff') }}</pre></section><section><b>{{ t('responseBody') }}</b><pre>{{ t('captureOff') }}</pre></section></div>
+          <p v-else-if="detailsLoading" class="hint">{{ t('captureLoading') }}</p>
+          <p v-else-if="detailsError" class="hint warning">{{ detailsError }}</p>
+          <div v-else-if="detailTab === 'headers'" class="capture-grid"><section><b>{{ t('requestHeaders') }}</b><pre>{{ formatCapturedHeaders(requestDetails?.request.headers) }}</pre></section><section><b>{{ t('responseHeaders') }}</b><pre>{{ formatCapturedHeaders(requestDetails?.response.headers) }}</pre></section></div>
+          <div v-else class="capture-grid"><section><b>{{ t('requestBody') }}</b><pre>{{ formatCapturedBody(requestDetails?.request) }}</pre></section><section><b>{{ t('responseBody') }}</b><pre>{{ formatCapturedBody(requestDetails?.response) }}</pre></section></div>
           <div class="actions">
             <p v-if="selected.pendingAt && !selected.releasedAt && !selected.blockedAt && !selected.abortedAt && !selected.finishedAt" class="pending-countdown" :class="{ expired: !selectedPendingActive }">{{ selectedPendingActive ? selectedPendingLabel : t('decisionExpired') }}</p>
             <button :disabled="!canOperate || !selectedPendingActive" class="allow" @click="decide('allow')">{{ t('allowPending') }}</button>

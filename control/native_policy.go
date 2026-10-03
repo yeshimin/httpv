@@ -87,7 +87,7 @@ func encodeNativePolicy(config GatewayConfig) ([]byte, error) {
 
 func encodeNativePolicyVersion(config GatewayConfig, version uint64) ([]byte, error) {
 	var subject Subject
-	nativeCompatible := len(config.Subjects) == 1
+	nativeCompatible := len(config.Subjects) == 1 && !config.Subjects[0].Capture.Enabled
 	if nativeCompatible {
 		subject = config.Subjects[0]
 	}
@@ -169,7 +169,7 @@ func (p *NativePolicyPublisher) publish(config GatewayConfig) (uint64, error) {
 	p.version = nextVersion
 	p.fingerprint = string(fingerprint)
 	p.mode = "native"
-	if len(config.Subjects) != 1 || (len(config.Subjects) == 1 && config.Subjects[0].Gate.Enabled) {
+	if len(config.Subjects) != 1 || (len(config.Subjects) == 1 && (config.Subjects[0].Gate.Enabled || config.Subjects[0].Capture.Enabled)) {
 		p.mode = "lua_fallback"
 	}
 	return p.version, nil

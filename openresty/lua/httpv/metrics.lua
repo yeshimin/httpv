@@ -14,6 +14,9 @@ local metric_names = {
   "gate_timeout_allow_total",
   "gate_timeout_block_total",
   "gate_client_abort_total",
+  "details_captured_total",
+  "details_dropped_total",
+  "detail_bytes_captured_total",
   "telemetry_events_enqueued_total",
   "telemetry_events_sent_total",
   "telemetry_events_dropped_total"

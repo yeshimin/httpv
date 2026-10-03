@@ -55,6 +55,13 @@ The fast path uses an atomic per-subject counter. If a worker exits before it
 can release a slot, the next overflow attempt reconciles that counter against
 the TTL-backed pending keys before enforcing the limit.
 
+## Detail capture
+
+Each subject also has an opt-in `capture` policy for request/response headers
+and bounded body previews. Capture is disabled by default and forces that
+subject onto the Lua compatibility path. See [detail capture](detail-capture.md)
+for the data path, redaction rules, limits, and TTL behavior.
+
 ## Validate and apply
 
 Validate a document without changing the running gateway:
