@@ -130,8 +130,9 @@ let clockTimer: number | undefined
 let policyTimer: number | undefined
 let eventFrame: number | undefined
 const eventQueue: EventMessage[] = []
-const canOperate = computed(() => authStatus.value.role === 'operator' || authStatus.value.role === 'admin')
-const canAdmin = computed(() => authStatus.value.role === 'admin')
+const controlReady = computed(() => subjects.value.some((candidate) => candidate.id === subject.value.id))
+const canOperate = computed(() => controlReady.value && (authStatus.value.role === 'operator' || authStatus.value.role === 'admin'))
+const canAdmin = computed(() => controlReady.value && authStatus.value.role === 'admin')
 
 async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}) {
   const headers = new Headers(init.headers)
@@ -162,9 +163,13 @@ function onLocaleChange(event: Event) {
   setLocale((event.target as HTMLSelectElement).value as Locale)
 }
 
+function cloneSubject(candidate: Subject): Subject {
+  return JSON.parse(JSON.stringify(candidate)) as Subject
+}
+
 function onSubjectChange(event: Event) {
   const next = subjects.value.find((candidate) => candidate.id === (event.target as HTMLSelectElement).value)
-  if (next) subject.value = structuredClone(next)
+  if (next) subject.value = cloneSubject(next)
 }
 
 const records = computed(() => Array.from(traffic.value.values()).sort((a, b) => a.startedAt - b.startedAt))
@@ -336,7 +341,7 @@ async function bootstrap() {
   upstreams.value = data.config.upstreams
   routes.value = data.config.routes
   const current = subjects.value.find((candidate) => candidate.id === subject.value.id) ?? subjects.value[0]
-  if (current) subject.value = structuredClone(current)
+  if (current) subject.value = cloneSubject(current)
   rules.value = data.config.rules
   const next = new Map<string, TrafficRecord>()
   for (const event of data.events as EventMessage[]) applyEventToMap(event, next)

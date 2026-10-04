@@ -160,6 +160,8 @@ class ConsoleE2E(unittest.TestCase):
     def setUp(self):
         api("PUT", "/api/subjects/default", subject())
         self.page = self.browser.new_page(viewport={"width": 1440, "height": 900})
+        self.console_errors = []
+        self.page.on("console", lambda message: self.console_errors.append(message.text) if message.type == "error" else None)
         self.page.goto(CONSOLE_URL, wait_until="networkidle")
         if self.page.locator(".login-panel").count() > 0:
             self.page.locator('.login-panel input[type="password"]').fill(ADMIN_TOKEN)
@@ -176,6 +178,13 @@ class ConsoleE2E(unittest.TestCase):
         self.assertGreater(canvas.evaluate("node => node.clientHeight"), 300)
         self.assertEqual(self.page.locator(".lane-label").all_text_contents(), ["Client", "OpenResty", "Upstream"])
         expect(self.page.locator(".role-state")).to_contain_text(re.compile("管理员|admin"))
+
+    def test_console_bootstrap_uses_configured_subject_without_errors(self):
+        _, raw = api("GET", "/api/config")
+        configured_id = json.loads(raw)["subjects"][0]["id"]
+        self.assertEqual(self.page.locator(".subject-picker select").input_value(), configured_id)
+        self.assertTrue(self.page.locator(".gate-toggle").is_enabled())
+        self.assertEqual(self.console_errors, [])
 
     def test_audit_records_authenticated_changes(self):
         _, raw = api("GET", "/api/audit?limit=50")
