@@ -6,8 +6,17 @@ local default_upstream_url = os.getenv("HTTPV_UPSTREAM_URL") or "http://demo:900
 local default_upstream_host = os.getenv("HTTPV_UPSTREAM_HOST") or "demo:9000"
 
 local default_config = {
+  schema_version = 1,
   upstreams = {
-    { id = "local-app", name = "Local application", url = default_upstream_url, host_header = default_upstream_host }
+    {
+      id = "local-app",
+      name = "Local application",
+      url = default_upstream_url,
+      host_header = default_upstream_host,
+      targets = { { id = "local-app-1", url = default_upstream_url, host_header = default_upstream_host, weight = 1 } },
+      max_failures = 1,
+      failure_timeout_ms = 10000
+    }
   },
   routes = {
     { id = "default-route", name = "Default route", enabled = true, match = { path_prefix = "/" }, upstream_id = "local-app" }
@@ -54,6 +63,7 @@ end
 
 function _M.put(config)
   if type(config) ~= "table"
+    or config.schema_version ~= 1
     or type(config.upstreams) ~= "table"
     or type(config.routes) ~= "table"
     or type(config.subjects) ~= "table"

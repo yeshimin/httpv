@@ -17,6 +17,8 @@ local metric_names = {
   "details_captured_total",
   "details_dropped_total",
   "detail_bytes_captured_total",
+  "upstream_failures_total",
+  "upstream_failover_skips_total",
   "telemetry_events_enqueued_total",
   "telemetry_events_sent_total",
   "telemetry_events_dropped_total"

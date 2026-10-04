@@ -4,6 +4,7 @@
     "control": {
       "build": "./control",
       "environment": {
+        "HTTPV_VISUAL_DETAIL_STARTS_PER_SEC": "32",
         "HTTPV_OPENRESTY_ADMIN_URL": "http://openresty:8091",
         "HTTPV_GATEWAY_URL": "http://openresty:8088",
         "HTTPV_NATIVE_POLICY_PATH": "/run/httpv/policy.bin",
@@ -23,7 +24,12 @@
       "build": {"context": ".", "dockerfile": "openresty/Dockerfile"},
       "environment": {
         "HTTPV_UPSTREAM_URL": "http://demo:9000",
-        "HTTPV_UPSTREAM_HOST": "demo:9000"
+        "HTTPV_UPSTREAM_HOST": "demo:9000",
+        "HTTPV_PROXY_CONNECT_TIMEOUT": "2s",
+        "HTTPV_PROXY_READ_TIMEOUT": "30s",
+        "HTTPV_PROXY_SEND_TIMEOUT": "30s",
+        "HTTPV_MAX_BODY_SIZE": "64m",
+        "HTTPV_ACCESS_LOG": "off"
       },
       "ports": ["18088:8088", "127.0.0.1:18091:8091"],
       "volumes": ["httpv_runtime:/run/httpv"],
@@ -32,6 +38,12 @@
     },
     "demo": {
       "build": "./demo",
+      "environment": {"HTTPV_DEMO_ID": "primary"},
+      "networks": ["internal"]
+    },
+    "demo2": {
+      "build": "./demo",
+      "environment": {"HTTPV_DEMO_ID": "secondary"},
       "networks": ["internal"]
     },
     "edge-agent": {
@@ -42,6 +54,7 @@
         "HTTPV_AGENT_RING_DIRECTORY": "/run/httpv",
         "HTTPV_AGENT_NATIVE_SOCKET_BUFFER_BYTES": "8388608",
         "HTTPV_AGENT_CONTROL_ADDR": "control:9100",
+        "HTTPV_AGENT_CONTROL_DNS_REFRESH_MS": "1000",
         "HTTPV_AGENT_METRICS_ADDR": "0.0.0.0:9102",
         "HTTPV_AGENT_QUEUE_CAPACITY": "65536",
         "HTTPV_AGENT_FORWARD_WORKERS": "4"

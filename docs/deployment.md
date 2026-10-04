@@ -18,6 +18,10 @@ The default endpoints are:
 - Control API: `http://127.0.0.1:8090`
 - Edge metrics: `http://127.0.0.1:9102`
 
+The edge agent re-resolves the control-plane address every second by default
+(`HTTPV_AGENT_CONTROL_DNS_REFRESH_MS`). Telemetry therefore resumes automatically
+after a control container or service is replaced and receives a new address.
+
 ## Hardened local deployment
 
 The production-oriented Compose file removes the bundled demo dependency,
@@ -41,6 +45,19 @@ Optional variables:
 - `HTTPV_VERSION`: local image tag.
 - `HTTPV_ADMIN_TOKEN`: required production administrator token.
 - `HTTPV_OPERATOR_TOKEN` and `HTTPV_VIEWER_TOKEN`: optional lower-privilege tokens.
+- `HTTPV_PROXY_CONNECT_TIMEOUT`: upstream connection timeout, default `5s`.
+- `HTTPV_PROXY_READ_TIMEOUT` and `HTTPV_PROXY_SEND_TIMEOUT`: default `60s`.
+- `HTTPV_MAX_BODY_SIZE`: accepted request-body ceiling, default `64m`.
+- `HTTPV_ACCESS_LOG`: Nginx access-log destination; defaults to `off` because
+  per-request container logging is expensive under high traffic. Set it to
+  `/dev/stdout` when raw access logs are explicitly required.
+- `HTTPV_VISUAL_DETAIL_STARTS_PER_SEC`: per-browser ceiling for new request
+  animations before ordinary events are summarized; default `360`. Pending and
+  operator-decision events remain individually visible.
+
+Request and response buffering are disabled so uploads, chunk streams, SSE, and
+WebSocket Upgrade can pass through without waiting for a complete body. Choose
+timeouts and body limits appropriate for the exposed application.
 
 ## Published images
 

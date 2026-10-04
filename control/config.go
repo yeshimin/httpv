@@ -36,8 +36,13 @@ func defaultGatewayConfig() GatewayConfig {
 		}
 	}
 	return GatewayConfig{
-		Upstreams: []Upstream{{ID: "local-app", Name: "Local application", URL: upstreamURL, HostHeader: hostHeader}},
-		Routes:    []Route{{ID: "default-route", Name: "Default route", Enabled: true, Match: Match{PathPrefix: "/"}, UpstreamID: "local-app"}},
+		SchemaVersion: 1,
+		Upstreams: []Upstream{{
+			ID: "local-app", Name: "Local application", URL: upstreamURL, HostHeader: hostHeader,
+			Targets:     []UpstreamTarget{{ID: "local-app-1", URL: upstreamURL, HostHeader: hostHeader, Weight: 1}},
+			MaxFailures: 1, FailureTimeoutMS: 10_000,
+		}},
+		Routes: []Route{{ID: "default-route", Name: "Default route", Enabled: true, Match: Match{PathPrefix: "/"}, UpstreamID: "local-app"}},
 		Subjects: []Subject{{
 			ID: "default", Name: "Default traffic", Enabled: true, Display: true,
 			Match: Match{PathPrefix: "/"}, Gate: Gate{Enabled: false, TimeoutMS: 30_000, TimeoutAction: "block", MaxPending: 2_000, OverflowAction: "block", FailureAction: "allow"},
@@ -94,12 +99,21 @@ func normalizeCapturePolicy(policy CapturePolicy) CapturePolicy {
 }
 
 func cloneGatewayConfig(config GatewayConfig) GatewayConfig {
-	return GatewayConfig{
-		Upstreams: append([]Upstream{}, config.Upstreams...),
-		Routes:    append([]Route{}, config.Routes...),
-		Subjects:  append([]Subject{}, config.Subjects...),
-		Rules:     append([]Rule{}, config.Rules...),
+	result := GatewayConfig{
+		SchemaVersion: config.SchemaVersion,
+		Upstreams:     append([]Upstream{}, config.Upstreams...),
+		Routes:        append([]Route{}, config.Routes...),
+		Subjects:      append([]Subject{}, config.Subjects...),
+		Rules:         append([]Rule{}, config.Rules...),
 	}
+	for index := range result.Upstreams {
+		result.Upstreams[index].Targets = append([]UpstreamTarget{}, config.Upstreams[index].Targets...)
+	}
+	for index := range result.Subjects {
+		result.Subjects[index].Capture.ContentTypes = append([]string{}, config.Subjects[index].Capture.ContentTypes...)
+		result.Subjects[index].Capture.RedactHeaders = append([]string{}, config.Subjects[index].Capture.RedactHeaders...)
+	}
+	return result
 }
 
 func normalizeMatch(match Match) Match {
@@ -113,12 +127,21 @@ func normalizeMatch(match Match) Match {
 }
 
 func normalizeGatewayConfig(config GatewayConfig) GatewayConfig {
+	if config.SchemaVersion == 0 {
+		config.SchemaVersion = 1
+	}
 	for index := range config.Upstreams {
 		upstream := &config.Upstreams[index]
 		upstream.ID = strings.TrimSpace(upstream.ID)
 		upstream.Name = strings.TrimSpace(upstream.Name)
 		upstream.URL = strings.TrimRight(strings.TrimSpace(upstream.URL), "/")
 		upstream.HostHeader = strings.TrimSpace(upstream.HostHeader)
+		if upstream.MaxFailures <= 0 {
+			upstream.MaxFailures = 1
+		}
+		if upstream.FailureTimeoutMS <= 0 {
+			upstream.FailureTimeoutMS = 10_000
+		}
 		if upstream.Name == "" {
 			upstream.Name = upstream.ID
 		}
@@ -126,6 +149,30 @@ func normalizeGatewayConfig(config GatewayConfig) GatewayConfig {
 			if parsed, err := url.Parse(upstream.URL); err == nil {
 				upstream.HostHeader = parsed.Host
 			}
+		}
+		if len(upstream.Targets) == 0 && upstream.URL != "" {
+			upstream.Targets = []UpstreamTarget{{ID: upstream.ID + "-1", URL: upstream.URL, HostHeader: upstream.HostHeader, Weight: 1}}
+		}
+		for targetIndex := range upstream.Targets {
+			target := &upstream.Targets[targetIndex]
+			target.ID = strings.TrimSpace(target.ID)
+			if target.ID == "" {
+				target.ID = fmt.Sprintf("%s-%d", upstream.ID, targetIndex+1)
+			}
+			target.URL = strings.TrimRight(strings.TrimSpace(target.URL), "/")
+			target.HostHeader = strings.TrimSpace(target.HostHeader)
+			if target.HostHeader == "" {
+				if parsed, err := url.Parse(target.URL); err == nil {
+					target.HostHeader = parsed.Host
+				}
+			}
+			if target.Weight <= 0 {
+				target.Weight = 1
+			}
+		}
+		if len(upstream.Targets) > 0 {
+			upstream.URL = upstream.Targets[0].URL
+			upstream.HostHeader = upstream.Targets[0].HostHeader
 		}
 	}
 	for index := range config.Routes {
@@ -185,6 +232,9 @@ func validConfigID(value string) bool {
 }
 
 func validateGatewayConfig(config GatewayConfig) error {
+	if config.SchemaVersion != 1 {
+		return fmt.Errorf("unsupported configuration schema version %d", config.SchemaVersion)
+	}
 	if len(config.Upstreams) == 0 {
 		return fmt.Errorf("at least one upstream is required")
 	}
@@ -196,9 +246,31 @@ func validateGatewayConfig(config GatewayConfig) error {
 		if _, exists := upstreams[upstream.ID]; exists {
 			return fmt.Errorf("duplicate upstream id %q", upstream.ID)
 		}
-		parsed, err := url.Parse(upstream.URL)
-		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
-			return fmt.Errorf("upstream %q must use an http(s) origin URL without a path", upstream.ID)
+		if len(upstream.Targets) == 0 {
+			return fmt.Errorf("upstream %q requires at least one target", upstream.ID)
+		}
+		targets := map[string]struct{}{}
+		for _, target := range upstream.Targets {
+			if !validConfigID(target.ID) {
+				return fmt.Errorf("upstream %q has invalid target id %q", upstream.ID, target.ID)
+			}
+			if _, exists := targets[target.ID]; exists {
+				return fmt.Errorf("upstream %q has duplicate target id %q", upstream.ID, target.ID)
+			}
+			targets[target.ID] = struct{}{}
+			parsed, err := url.Parse(target.URL)
+			if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
+				return fmt.Errorf("upstream %q target %q must use an http(s) origin URL without a path", upstream.ID, target.ID)
+			}
+			if target.Weight < 1 || target.Weight > 1000 {
+				return fmt.Errorf("upstream %q target %q weight must be between 1 and 1000", upstream.ID, target.ID)
+			}
+		}
+		if upstream.MaxFailures < 1 || upstream.MaxFailures > 100 {
+			return fmt.Errorf("upstream %q max failures must be between 1 and 100", upstream.ID)
+		}
+		if upstream.FailureTimeoutMS < 100 || upstream.FailureTimeoutMS > 3_600_000 {
+			return fmt.Errorf("upstream %q failure timeout must be between 100 and 3600000ms", upstream.ID)
 		}
 		upstreams[upstream.ID] = struct{}{}
 	}

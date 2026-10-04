@@ -6,7 +6,8 @@ type Match = { host: string; path_prefix: string; method: string }
 type Gate = { enabled: boolean; timeout_ms: number; timeout_action: 'allow' | 'block'; max_pending: number; overflow_action: 'allow' | 'block' | 'reject'; failure_action: 'allow' | 'block' }
 type CapturePolicy = { enabled: boolean; request_headers: boolean; response_headers: boolean; request_body: boolean; response_body: boolean; max_body_bytes: number; ttl_seconds: number; sample_rate: number; content_types: string[]; redact_headers: string[] }
 type Subject = { id: string; name: string; enabled: boolean; display: boolean; match: Match; gate: Gate; capture: CapturePolicy }
-type Upstream = { id: string; name: string; url: string; host_header: string }
+type UpstreamTarget = { id: string; url: string; host_header: string; weight: number }
+type Upstream = { id: string; name: string; url?: string; host_header?: string; targets: UpstreamTarget[]; max_failures: number; failure_timeout_ms: number }
 type Route = { id: string; name: string; enabled: boolean; match: Match; upstream_id: string }
 type Rule = { id: string; subject_id?: string; action: string; path_prefix: string; method: string; client_ip: string; created_at: number }
 type EventMessage = {
@@ -22,6 +23,7 @@ type NativePolicyStatus = { version: number; state: 'active' | 'pending' | 'unpu
 type AuthStatus = { enabled: boolean; authenticated: boolean; role?: 'viewer' | 'operator' | 'admin'; csrf_token?: string }
 type CapturedSide = { headers?: Record<string, unknown>; body?: string; truncated?: boolean; content_type?: string; body_unavailable?: string; status?: number }
 type RequestDetails = { request_id: string; subject_id: string; captured_at: number; finished_at?: number; duration_ms?: number; request: CapturedSide; response: CapturedSide }
+type ConfigRevisionSummary = { revision: number; created_at: number; source: string }
 
 type Locale = 'zh' | 'en'
 const messages: Record<Locale, Record<string, string>> = {
@@ -51,7 +53,8 @@ const messages: Record<Locale, Record<string, string>> = {
     requestHeaders: '请求 Header', responseHeaders: '响应 Header', requestBody: '请求 Body', responseBody: '响应 Body',
     captureOff: '内容采集尚未开启。后续将按规则限长、脱敏并默认关闭。', managedSubject: '监管对象', topology: '{routes} 条路由 · {upstreams} 个上游',
     signIn: '登录 HTTPV', accessToken: '访问 Token', signInAction: '登录', invalidToken: 'Token 无效或登录失败', signOut: '退出', roleViewer: '只读', roleOperator: '操作员', roleAdmin: '管理员',
-    captureSettings: '详情采集', captureEnabled: '开启采集', captureRequestHeaders: '请求 Header', captureResponseHeaders: '响应 Header', captureRequestBody: '请求 Body', captureResponseBody: '响应 Body', captureLimit: 'Body 上限', captureTTL: '保留秒数', captureSample: '采样率', captureSensitive: '采集内容可能包含敏感数据；强制脱敏鉴权与 Cookie Header。', captureLoading: '正在读取详情…', captureUnavailable: '该请求未采集详情、已过期或当前角色无权读取。', captureTruncated: '内容已截断'
+    captureSettings: '详情采集', captureEnabled: '开启采集', captureRequestHeaders: '请求 Header', captureResponseHeaders: '响应 Header', captureRequestBody: '请求 Body', captureResponseBody: '响应 Body', captureLimit: 'Body 上限', captureTTL: '保留秒数', captureSample: '采样率', captureSensitive: '采集内容可能包含敏感数据；强制脱敏鉴权与 Cookie Header。', captureLoading: '正在读取详情…', captureUnavailable: '该请求未采集详情、已过期或当前角色无权读取。', captureTruncated: '内容已截断',
+    gatewayConfig: '网关配置', configValidate: '校验', configApply: '应用配置', configValid: '配置有效', configApplied: '配置已应用', configInvalid: '配置无效', configHistory: '版本历史', configRollback: '回滚', configClose: '关闭', confirmRollback: '确认回滚到版本 {revision}？回滚会生成一个新版本。'
   },
   en: {
     commandSurface: 'Traffic command surface', connecting: 'connecting', live: 'live', closed: 'closed',
@@ -79,7 +82,8 @@ const messages: Record<Locale, Record<string, string>> = {
     requestHeaders: 'Request headers', responseHeaders: 'Response headers', requestBody: 'Request body', responseBody: 'Response body',
     captureOff: 'Content capture is not enabled. It will be opt-in, size-limited, and redacted.', managedSubject: 'Managed subject', topology: '{routes} routes · {upstreams} upstreams',
     signIn: 'Sign in to HTTPV', accessToken: 'Access token', signInAction: 'Sign in', invalidToken: 'Invalid token or sign-in failed', signOut: 'Sign out', roleViewer: 'viewer', roleOperator: 'operator', roleAdmin: 'admin',
-    captureSettings: 'Detail capture', captureEnabled: 'Enable capture', captureRequestHeaders: 'Request headers', captureResponseHeaders: 'Response headers', captureRequestBody: 'Request body', captureResponseBody: 'Response body', captureLimit: 'Body limit', captureTTL: 'Retention seconds', captureSample: 'Sample rate', captureSensitive: 'Captured content may be sensitive; authentication and cookie headers are always redacted.', captureLoading: 'Loading details…', captureUnavailable: 'Details were not captured, have expired, or are not available to this role.', captureTruncated: 'Content truncated'
+    captureSettings: 'Detail capture', captureEnabled: 'Enable capture', captureRequestHeaders: 'Request headers', captureResponseHeaders: 'Response headers', captureRequestBody: 'Request body', captureResponseBody: 'Response body', captureLimit: 'Body limit', captureTTL: 'Retention seconds', captureSample: 'Sample rate', captureSensitive: 'Captured content may be sensitive; authentication and cookie headers are always redacted.', captureLoading: 'Loading details…', captureUnavailable: 'Details were not captured, have expired, or are not available to this role.', captureTruncated: 'Content truncated',
+    gatewayConfig: 'Gateway configuration', configValidate: 'Validate', configApply: 'Apply configuration', configValid: 'Configuration is valid', configApplied: 'Configuration applied', configInvalid: 'Invalid configuration', configHistory: 'Revision history', configRollback: 'Rollback', configClose: 'Close', confirmRollback: 'Rollback to revision {revision}? Rollback creates a new revision.'
   }
 }
 
@@ -113,6 +117,12 @@ const loginError = ref('')
 const requestDetails = ref<RequestDetails>()
 const detailsLoading = ref(false)
 const detailsError = ref('')
+const configEditorOpen = ref(false)
+const configEditorText = ref('')
+const configEditorMessage = ref('')
+const configEditorError = ref(false)
+const configRevision = ref(0)
+const configRevisions = ref<ConfigRevisionSummary[]>([])
 const timeoutEventGraceMs = 2_000
 const selectedDetailRetentionMs = 60_000
 let socket: WebSocket | undefined
@@ -128,6 +138,15 @@ async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}) {
   const method = (init.method ?? 'GET').toUpperCase()
   if (csrfToken.value && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) headers.set('X-HTTPV-CSRF', csrfToken.value)
   return fetch(input, { ...init, headers, credentials: 'same-origin' })
+}
+
+async function readError(response: Response) {
+  try {
+    const payload = await response.json() as { error?: string }
+    return payload.error ?? `${response.status} ${response.statusText}`
+  } catch {
+    return `${response.status} ${response.statusText}`
+  }
 }
 
 function t(key: string, values: Record<string, string | number> = {}) {
@@ -312,6 +331,7 @@ async function bootstrap() {
   const response = await apiFetch('/api/bootstrap')
   if (!response.ok) throw new Error('Unable to load control state')
   const data = await response.json()
+  configRevision.value = data.config_revision ?? configRevision.value
   subjects.value = data.config.subjects
   upstreams.value = data.config.upstreams
   routes.value = data.config.routes
@@ -336,6 +356,78 @@ async function refreshPolicyStatus() {
   } catch {
     // Policy status is advisory; a transient control-plane read must not affect traffic control.
   }
+}
+
+async function refreshConfigRevisions() {
+  const response = await apiFetch('/api/config/revisions')
+  if (!response.ok) return
+  const payload = await response.json() as { current: number; revisions: ConfigRevisionSummary[] }
+  configRevision.value = payload.current
+  configRevisions.value = payload.revisions
+}
+
+async function openConfigEditor() {
+  configEditorMessage.value = ''
+  configEditorError.value = false
+  const response = await apiFetch('/api/config')
+  if (!response.ok) return
+  configEditorText.value = JSON.stringify(await response.json(), null, 2)
+  await refreshConfigRevisions()
+  configEditorOpen.value = true
+}
+
+function parsedEditorConfig() {
+  try {
+    return JSON.parse(configEditorText.value)
+  } catch {
+    configEditorMessage.value = t('configInvalid')
+    configEditorError.value = true
+    return undefined
+  }
+}
+
+async function validateEditorConfig() {
+  const config = parsedEditorConfig()
+  if (!config) return
+  const response = await apiFetch('/api/config/validate', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config)
+  })
+  configEditorError.value = !response.ok
+  configEditorMessage.value = response.ok ? t('configValid') : await readError(response)
+}
+
+async function applyEditorConfig() {
+  const config = parsedEditorConfig()
+  if (!config) return
+  const response = await apiFetch('/api/config', {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(config)
+  })
+  configEditorError.value = !response.ok
+  if (!response.ok) {
+    configEditorMessage.value = await readError(response)
+    return
+  }
+  configEditorText.value = JSON.stringify(await response.json(), null, 2)
+  configEditorMessage.value = t('configApplied')
+  await bootstrap()
+  await refreshConfigRevisions()
+}
+
+async function rollbackEditorConfig(revision: number) {
+  if (!window.confirm(t('confirmRollback', { revision }))) return
+  const response = await apiFetch(`/api/config/rollback/${revision}`, {
+    method: 'POST', headers: { 'X-HTTPV-Confirm': `rollback:${revision}` }
+  })
+  configEditorError.value = !response.ok
+  if (!response.ok) {
+    configEditorMessage.value = await readError(response)
+    return
+  }
+  const payload = await response.json() as { revision: number; config: unknown }
+  configEditorText.value = JSON.stringify(payload.config, null, 2)
+  configEditorMessage.value = t('configApplied')
+  await bootstrap()
+  await refreshConfigRevisions()
 }
 
 function connect() {
@@ -601,6 +693,7 @@ onBeforeUnmount(() => {
       <div class="topbar-right">
         <div class="policy-state" :class="policyStatus.state">{{ policyLabel }}</div>
         <span v-if="authStatus.enabled" class="role-state">{{ roleLabel() }}</span>
+        <button v-if="canAdmin" class="sign-out" @click="openConfigEditor">{{ t('gatewayConfig') }}</button>
         <label class="language-picker"><span>{{ t('language') }}</span><select :value="locale" @change="onLocaleChange"><option value="zh">中文</option><option value="en">English</option></select></label>
         <div class="status" :class="connectionState"><span></span>{{ t(connectionState) }}</div>
         <button v-if="authStatus.enabled" class="sign-out" @click="signOut">{{ t('signOut') }}</button>
@@ -728,6 +821,16 @@ onBeforeUnmount(() => {
         </ul>
         </article>
       </aside>
+    </div>
+
+    <div v-if="configEditorOpen" class="config-overlay" @click.self="configEditorOpen = false">
+      <section class="config-editor">
+        <header><div><h2>{{ t('gatewayConfig') }}</h2><small>revision {{ configRevision }}</small></div><button class="sign-out" @click="configEditorOpen = false">{{ t('configClose') }}</button></header>
+        <textarea v-model="configEditorText" spellcheck="false" aria-label="HTTPV gateway JSON configuration"></textarea>
+        <div class="config-actions"><button class="outline" @click="validateEditorConfig">{{ t('configValidate') }}</button><button class="test-button" @click="applyEditorConfig">{{ t('configApply') }}</button></div>
+        <p v-if="configEditorMessage" class="config-message" :class="{ error: configEditorError }">{{ configEditorMessage }}</p>
+        <div class="revision-list"><h3>{{ t('configHistory') }}</h3><div v-for="revision in configRevisions" :key="revision.revision"><span><b>v{{ revision.revision }}</b>{{ formatTimestamp(revision.created_at) }} · {{ revision.source }}</span><button class="outline" :disabled="revision.revision === configRevision" @click="rollbackEditorConfig(revision.revision)">{{ t('configRollback') }}</button></div></div>
+      </section>
     </div>
   </main>
 </template>

@@ -16,7 +16,8 @@ use std::{
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{lookup_host, TcpListener, UdpSocket, UnixDatagram, UnixListener, UnixStream},
-    sync::mpsc,
+    sync::{mpsc, watch},
+    time::sleep,
 };
 
 const HEADER_LENGTH: usize = 38;
@@ -35,6 +36,8 @@ struct Stats {
     forward_errors: AtomicU64,
     native_socket_buffer_bytes: AtomicU64,
     ring_events_received: AtomicU64,
+    control_resolutions: AtomicU64,
+    control_resolution_errors: AtomicU64,
 }
 
 fn setting(name: &str, fallback: &str) -> String {
@@ -199,7 +202,7 @@ async fn metrics_server(stats: Arc<Stats>, address: String) -> std::io::Result<(
             let mut request = [0_u8; 1024];
             let _ = stream.read(&mut request).await;
             let body = format!(
-                "httpv_edge_events_received {}\nhttpv_edge_events_forwarded {}\nhttpv_edge_events_dropped {}\nhttpv_edge_invalid_frames {}\nhttpv_edge_forward_errors {}\nhttpv_edge_native_socket_buffer_bytes {}\nhttpv_edge_ring_events_received {}\n",
+                "httpv_edge_events_received {}\nhttpv_edge_events_forwarded {}\nhttpv_edge_events_dropped {}\nhttpv_edge_invalid_frames {}\nhttpv_edge_forward_errors {}\nhttpv_edge_native_socket_buffer_bytes {}\nhttpv_edge_ring_events_received {}\nhttpv_edge_control_resolutions_total {}\nhttpv_edge_control_resolution_errors_total {}\n",
                 stats.received.load(Ordering::Relaxed),
                 stats.forwarded.load(Ordering::Relaxed),
                 stats.dropped.load(Ordering::Relaxed),
@@ -207,6 +210,8 @@ async fn metrics_server(stats: Arc<Stats>, address: String) -> std::io::Result<(
                 stats.forward_errors.load(Ordering::Relaxed),
                 stats.native_socket_buffer_bytes.load(Ordering::Relaxed),
                 stats.ring_events_received.load(Ordering::Relaxed),
+                stats.control_resolutions.load(Ordering::Relaxed),
+                stats.control_resolution_errors.load(Ordering::Relaxed),
             );
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -215,6 +220,15 @@ async fn metrics_server(stats: Arc<Stats>, address: String) -> std::io::Result<(
             let _ = stream.write_all(response.as_bytes()).await;
         });
     }
+}
+
+async fn resolve_control_address(address: &str) -> io::Result<std::net::SocketAddr> {
+    lookup_host(address).await?.next().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::AddrNotAvailable,
+            "control address did not resolve",
+        )
+    })
 }
 
 async fn receive_stream(
@@ -293,6 +307,12 @@ async fn main() -> std::io::Result<()> {
         .parse()
         .unwrap_or(8_388_608);
     let control_address = setting("HTTPV_AGENT_CONTROL_ADDR", "control:9100");
+    let control_dns_refresh = Duration::from_millis(
+        setting("HTTPV_AGENT_CONTROL_DNS_REFRESH_MS", "1000")
+            .parse()
+            .unwrap_or(1_000)
+            .max(100),
+    );
     let metrics_address = setting("HTTPV_AGENT_METRICS_ADDR", "0.0.0.0:9102");
     let queue_capacity = setting("HTTPV_AGENT_QUEUE_CAPACITY", "65536")
         .parse()
@@ -320,27 +340,45 @@ async fn main() -> std::io::Result<()> {
         bind_native_datagram(&native_socket_path, native_socket_buffer_bytes)?;
     fs::set_permissions(&native_socket_path, fs::Permissions::from_mode(0o666))?;
     let output = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
-    let control_address = lookup_host(&control_address).await?.next().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::AddrNotAvailable,
-            "control address did not resolve",
-        )
-    })?;
+    let initial_control_address = resolve_control_address(&control_address).await?;
+    let (control_target_sender, control_target_receiver) = watch::channel(initial_control_address);
     let stats = Arc::new(Stats::default());
+    stats.control_resolutions.store(1, Ordering::Relaxed);
     stats.native_socket_buffer_bytes.store(
         effective_native_socket_buffer_bytes as u64,
         Ordering::Relaxed,
     );
+    let resolver_stats = Arc::clone(&stats);
+    tokio::spawn(async move {
+        loop {
+            sleep(control_dns_refresh).await;
+            match resolve_control_address(&control_address).await {
+                Ok(address) => {
+                    control_target_sender.send_replace(address);
+                    resolver_stats
+                        .control_resolutions
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                Err(_) => {
+                    resolver_stats
+                        .control_resolution_errors
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+    });
     let queue_per_worker = (queue_capacity / forward_workers).max(1);
     let mut sender_list = Vec::with_capacity(forward_workers);
     for _ in 0..forward_workers {
         let (sender, mut receiver) = mpsc::channel::<Bytes>(queue_per_worker);
         let forward_stats = Arc::clone(&stats);
         let output = Arc::clone(&output);
+        let mut control_target = control_target_receiver.clone();
         sender_list.push(sender);
         tokio::spawn(async move {
             while let Some(event) = receiver.recv().await {
-                match output.send_to(&event, control_address).await {
+                let address = *control_target.borrow_and_update();
+                match output.send_to(&event, address).await {
                     Ok(_) => {
                         forward_stats.forwarded.fetch_add(1, Ordering::Relaxed);
                     }

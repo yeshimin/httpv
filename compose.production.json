@@ -6,6 +6,7 @@
       "image": "httpv-control:${HTTPV_VERSION:-local}",
       "restart": "unless-stopped",
       "environment": {
+        "HTTPV_VISUAL_DETAIL_STARTS_PER_SEC": "${HTTPV_VISUAL_DETAIL_STARTS_PER_SEC:-360}",
         "HTTPV_OPENRESTY_ADMIN_URL": "http://openresty:8091",
         "HTTPV_GATEWAY_URL": "http://openresty:8088",
         "HTTPV_NATIVE_POLICY_PATH": "/run/httpv/policy.bin",
@@ -41,6 +42,7 @@
         "HTTPV_AGENT_RING_DIRECTORY": "/run/httpv",
         "HTTPV_AGENT_NATIVE_SOCKET_BUFFER_BYTES": "8388608",
         "HTTPV_AGENT_CONTROL_ADDR": "control:9100",
+        "HTTPV_AGENT_CONTROL_DNS_REFRESH_MS": "${HTTPV_AGENT_CONTROL_DNS_REFRESH_MS:-1000}",
         "HTTPV_AGENT_METRICS_ADDR": "0.0.0.0:9102",
         "HTTPV_AGENT_QUEUE_CAPACITY": "65536",
         "HTTPV_AGENT_FORWARD_WORKERS": "4"
@@ -59,7 +61,12 @@
       "restart": "unless-stopped",
       "environment": {
         "HTTPV_UPSTREAM_URL": "${HTTPV_UPSTREAM_URL:-http://host.docker.internal:9998}",
-        "HTTPV_UPSTREAM_HOST": "${HTTPV_UPSTREAM_HOST:-127.0.0.1:9998}"
+        "HTTPV_UPSTREAM_HOST": "${HTTPV_UPSTREAM_HOST:-127.0.0.1:9998}",
+        "HTTPV_PROXY_CONNECT_TIMEOUT": "${HTTPV_PROXY_CONNECT_TIMEOUT:-5s}",
+        "HTTPV_PROXY_READ_TIMEOUT": "${HTTPV_PROXY_READ_TIMEOUT:-60s}",
+        "HTTPV_PROXY_SEND_TIMEOUT": "${HTTPV_PROXY_SEND_TIMEOUT:-60s}",
+        "HTTPV_MAX_BODY_SIZE": "${HTTPV_MAX_BODY_SIZE:-64m}",
+        "HTTPV_ACCESS_LOG": "${HTTPV_ACCESS_LOG:-off}"
       },
       "ports": ["${HTTPV_GATEWAY_BIND:-0.0.0.0}:${HTTPV_GATEWAY_PORT:-8088}:8088"],
       "extra_hosts": ["host.docker.internal:host-gateway"],

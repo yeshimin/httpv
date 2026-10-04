@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -83,34 +86,37 @@ func TestTrafficSummaryKeepsTopPathsAndControlSignals(t *testing.T) {
 }
 
 func TestDetailBudgetPreservesVisibleAndPriorityRequests(t *testing.T) {
+	const detailRate = 8
 	now := time.Now()
 	c := &client{visible: map[string]time.Time{}}
 	first := TrafficEvent{Phase: "request_started", RequestID: "first"}
-	if !c.shouldShowDetail(first, now) || !c.shouldShowDetail(TrafficEvent{Phase: "response_finished", RequestID: "first"}, now) {
+	if !c.shouldShowDetail(first, now, detailRate) || !c.shouldShowDetail(TrafficEvent{Phase: "response_finished", RequestID: "first"}, now, detailRate) {
 		t.Fatal("visible request lifecycle should remain detailed")
 	}
-	for i := 0; i < visualDetailStartsPerSec-1; i++ {
-		if !c.shouldShowDetail(TrafficEvent{Phase: "request_started", RequestID: string(rune(i + 1_000))}, now) {
+	for i := 0; i < detailRate-1; i++ {
+		if !c.shouldShowDetail(TrafficEvent{Phase: "request_started", RequestID: string(rune(i + 1_000))}, now, detailRate) {
 			t.Fatal("detail budget ended too early")
 		}
 	}
-	if c.shouldShowDetail(TrafficEvent{Phase: "request_started", RequestID: "summarized"}, now) {
+	if c.shouldShowDetail(TrafficEvent{Phase: "request_started", RequestID: "summarized"}, now, detailRate) {
 		t.Fatal("ordinary request should become summarized after the detail budget")
 	}
-	if !c.shouldShowDetail(TrafficEvent{Phase: "request_pending", RequestID: "priority"}, now) {
+	if !c.shouldShowDetail(TrafficEvent{Phase: "request_pending", RequestID: "priority"}, now, detailRate) {
 		t.Fatal("manual-gate request must remain detailed under overload")
 	}
 }
 
 func TestHubSendsOverloadSummaryAfterDetailBudget(t *testing.T) {
+	const detailRate = 8
 	hub := newHub()
+	hub.detailRate = detailRate
 	c := &client{
 		priority: make(chan []byte, 4),
-		detail:   make(chan []byte, visualDetailStartsPerSec+1),
+		detail:   make(chan []byte, detailRate+1),
 		visible:  map[string]time.Time{},
 	}
 	hub.clients[c] = struct{}{}
-	for i := 0; i < visualDetailStartsPerSec+1; i++ {
+	for i := 0; i < detailRate+1; i++ {
 		hub.broadcast(TrafficEvent{
 			Phase:       "request_started",
 			RequestID:   string(rune(i + 2_000)),
@@ -133,6 +139,50 @@ func TestHubSendsOverloadSummaryAfterDetailBudget(t *testing.T) {
 	default:
 		t.Fatal("expected an overload summary")
 	}
+}
+
+func TestHubReadsVisualDetailRate(t *testing.T) {
+	t.Setenv("HTTPV_VISUAL_DETAIL_STARTS_PER_SEC", "27")
+	if rate := newHub().detailRate; rate != 27 {
+		t.Fatalf("expected configured detail rate 27, got %d", rate)
+	}
+}
+
+func TestDemoLoadGeneratorReportsActiveAndIdle(t *testing.T) {
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		started <- struct{}{}
+		<-release
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	generator := newDemoLoadGenerator(ctx, server.URL)
+	if accepted := generator.submit(1, "/probe"); accepted != 1 {
+		t.Fatalf("expected one accepted job, got %d", accepted)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("demo request did not start")
+	}
+	status := generator.status()
+	if status["active"] != 1 || status["queued"] != 0 {
+		t.Fatalf("unexpected active status: %#v", status)
+	}
+	close(release)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		status = generator.status()
+		if status["active"] == 0 && status["queued"] == 0 {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("demo generator did not become idle: %#v", status)
 }
 
 func TestTerminalEventsEndBrowserLifecycle(t *testing.T) {
@@ -273,6 +323,26 @@ func TestGatewayConfigValidatesRouteReferences(t *testing.T) {
 	config.Routes = append(config.Routes, Route{ID: "api", Enabled: true, Match: Match{Host: "api.local", PathPrefix: "/v1"}, UpstreamID: "second"})
 	if err := validateGatewayConfig(normalizeGatewayConfig(config)); err != nil {
 		t.Fatalf("valid multi-route configuration rejected: %v", err)
+	}
+}
+
+func TestGatewayConfigSchemaAndTargets(t *testing.T) {
+	config := defaultGatewayConfig()
+	config.SchemaVersion = 2
+	if err := validateGatewayConfig(normalizeGatewayConfig(config)); err == nil {
+		t.Fatal("expected unsupported schema version error")
+	}
+	config = defaultGatewayConfig()
+	config.Upstreams[0].Targets[0].Weight = 0
+	normalized := normalizeGatewayConfig(config)
+	if normalized.Upstreams[0].Targets[0].Weight != 1 {
+		t.Fatalf("target weight was not normalized: %#v", normalized.Upstreams[0])
+	}
+	cloned := cloneGatewayConfig(normalized)
+	cloned.Upstreams[0].Targets[0].URL = "http://changed:8080"
+	cloned.Subjects[0].Capture.RedactHeaders[0] = "changed"
+	if normalized.Upstreams[0].Targets[0].URL == cloned.Upstreams[0].Targets[0].URL || normalized.Subjects[0].Capture.RedactHeaders[0] == "changed" {
+		t.Fatal("gateway clone shares nested configuration slices")
 	}
 }
 

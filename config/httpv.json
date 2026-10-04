@@ -1,10 +1,16 @@
 {
+  "schema_version": 1,
   "upstreams": [
     {
       "id": "local-app",
       "name": "Local application",
       "url": "http://host.docker.internal:9998",
-      "host_header": "127.0.0.1:9998"
+      "host_header": "127.0.0.1:9998",
+      "targets": [
+        {"id": "local-app-1", "url": "http://host.docker.internal:9998", "host_header": "127.0.0.1:9998", "weight": 1}
+      ],
+      "max_failures": 1,
+      "failure_timeout_ms": 10000
     }
   ],
   "routes": [

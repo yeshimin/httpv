@@ -2,6 +2,7 @@ local config = require "httpv.config"
 local details = require "httpv.details"
 local metrics = require "httpv.metrics"
 local publisher = require "httpv.publisher"
+local routing = require "httpv.routing"
 
 local _M = {}
 
@@ -48,15 +49,6 @@ local function match_route(gateway, method, host, path)
   for _, route in ipairs(gateway.routes or {}) do
     if matches(route, method, host, path) then
       return route
-    end
-  end
-  return nil
-end
-
-local function find_upstream(gateway, upstream_id)
-  for _, upstream in ipairs(gateway.upstreams or {}) do
-    if upstream.id == upstream_id then
-      return upstream
     end
   end
   return nil
@@ -260,10 +252,11 @@ function _M.access()
   local gateway = config.get()
   local route = match_route(gateway, method, host, path)
   if route then
-    local upstream = find_upstream(gateway, route.upstream_id)
-    if upstream then
-      ngx.var.httpv_upstream_url = upstream.url
-      ngx.var.httpv_upstream_host = upstream.host_header or ""
+    local target, route_ctx = routing.select(gateway, route)
+    if target then
+      ngx.var.httpv_upstream_url = target.url
+      ngx.var.httpv_upstream_host = target.host_header or ""
+      ngx.ctx.httpv_route = route_ctx
     end
   end
   local subject = match_subject(gateway, method, host, path)
@@ -327,6 +320,7 @@ function _M.response_body()
 end
 
 function _M.response_finished()
+  routing.finish(ngx.ctx.httpv_route, ngx.var.upstream_status)
   if ngx.var.httpv_native_fast_path == "1" then
     return
   end

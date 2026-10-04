@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -23,10 +24,15 @@ import (
 )
 
 const (
-	maxRecentEvents          = 2_000
-	visualDetailStartsPerSec = 360
-	visualSummaryInterval    = 500 * time.Millisecond
-	visualRecordTTL          = time.Minute
+	maxRecentEvents         = 2_000
+	defaultVisualDetailRate = 360
+	visualSummaryInterval   = 500 * time.Millisecond
+	visualRecordTTL         = time.Minute
+	hubPriorityQueueSize    = 2_048
+	hubDetailQueueSize      = 16_384
+	udpReadBufferBytes      = 16 << 20
+	demoMaxConcurrency      = 128
+	demoQueueSize           = 4_096
 )
 
 type Match struct {
@@ -68,10 +74,20 @@ type CapturePolicy struct {
 }
 
 type Upstream struct {
+	ID               string           `json:"id"`
+	Name             string           `json:"name"`
+	URL              string           `json:"url,omitempty"`
+	HostHeader       string           `json:"host_header,omitempty"`
+	Targets          []UpstreamTarget `json:"targets"`
+	MaxFailures      int64            `json:"max_failures"`
+	FailureTimeoutMS int64            `json:"failure_timeout_ms"`
+}
+
+type UpstreamTarget struct {
 	ID         string `json:"id"`
-	Name       string `json:"name"`
 	URL        string `json:"url"`
 	HostHeader string `json:"host_header"`
+	Weight     int64  `json:"weight"`
 }
 
 type Route struct {
@@ -93,10 +109,11 @@ type Rule struct {
 }
 
 type GatewayConfig struct {
-	Upstreams []Upstream `json:"upstreams"`
-	Routes    []Route    `json:"routes"`
-	Subjects  []Subject  `json:"subjects"`
-	Rules     []Rule     `json:"rules"`
+	SchemaVersion int        `json:"schema_version"`
+	Upstreams     []Upstream `json:"upstreams"`
+	Routes        []Route    `json:"routes"`
+	Subjects      []Subject  `json:"subjects"`
+	Rules         []Rule     `json:"rules"`
 }
 
 type TrafficEvent struct {
@@ -278,11 +295,25 @@ type client struct {
 }
 
 type Hub struct {
-	mu      sync.Mutex
-	clients map[*client]struct{}
+	mu             sync.Mutex
+	clients        map[*client]struct{}
+	priorityEvents chan TrafficEvent
+	detailEvents   chan TrafficEvent
+	detailRate     int
 }
 
-func newHub() *Hub { return &Hub{clients: map[*client]struct{}{}} }
+func newHub() *Hub {
+	detailRate := defaultVisualDetailRate
+	if configured, err := strconv.Atoi(os.Getenv("HTTPV_VISUAL_DETAIL_STARTS_PER_SEC")); err == nil && configured > 0 {
+		detailRate = configured
+	}
+	return &Hub{
+		clients:        map[*client]struct{}{},
+		priorityEvents: make(chan TrafficEvent, hubPriorityQueueSize),
+		detailEvents:   make(chan TrafficEvent, hubDetailQueueSize),
+		detailRate:     detailRate,
+	}
+}
 
 func terminalEvent(event TrafficEvent) bool {
 	return event.Phase == "response_finished" || event.Phase == "request_aborted"
@@ -299,7 +330,7 @@ func (c *client) aggregate(event TrafficEvent) {
 	c.summary.add(event)
 }
 
-func (c *client) shouldShowDetail(event TrafficEvent, now time.Time) bool {
+func (c *client) shouldShowDetail(event TrafficEvent, now time.Time, detailRate int) bool {
 	if _, ok := c.visible[event.RequestID]; ok {
 		if terminalEvent(event) {
 			delete(c.visible, event.RequestID)
@@ -317,7 +348,7 @@ func (c *client) shouldShowDetail(event TrafficEvent, now time.Time) bool {
 		c.detailWindow = now
 		c.detailStarts = 0
 	}
-	if c.detailStarts >= visualDetailStartsPerSec {
+	if c.detailStarts >= detailRate {
 		return false
 	}
 	c.detailStarts++
@@ -334,7 +365,7 @@ func (h *Hub) broadcast(event TrafficEvent) {
 	now := time.Now()
 	var payload []byte
 	for c := range h.clients {
-		if !c.shouldShowDetail(event, now) {
+		if !c.shouldShowDetail(event, now, h.detailRate) {
 			c.aggregate(event)
 			continue
 		}
@@ -354,6 +385,22 @@ func (h *Hub) broadcast(event TrafficEvent) {
 		default:
 			c.aggregate(event)
 		}
+	}
+}
+
+// enqueue keeps UDP ingestion independent from browser rendering. Under an
+// overload, lifecycle decisions retain their own queue while ordinary visual
+// detail may be sampled by the already bounded WebSocket path.
+func (h *Hub) enqueue(event TrafficEvent) {
+	queue := h.detailEvents
+	if priorityEvent(event) {
+		queue = h.priorityEvents
+	}
+	select {
+	case queue <- event:
+	default:
+		// Do not stall the telemetry receiver. The Store has already retained
+		// the event and the data plane is never coupled to console delivery.
 	}
 }
 
@@ -385,9 +432,21 @@ func (h *Hub) run(ctx context.Context) {
 	ticker := time.NewTicker(visualSummaryInterval)
 	defer ticker.Stop()
 	for {
+		// Drain decisions before ordinary detail so operator actions remain
+		// visible even while a large traffic burst is being summarized.
+		select {
+		case event := <-h.priorityEvents:
+			h.broadcast(event)
+			continue
+		default:
+		}
 		select {
 		case <-ctx.Done():
 			return
+		case event := <-h.priorityEvents:
+			h.broadcast(event)
+		case event := <-h.detailEvents:
+			h.broadcast(event)
 		case now := <-ticker.C:
 			h.flushSummaries(now)
 		}
@@ -447,6 +506,72 @@ func (h *Hub) serveWS(w http.ResponseWriter, r *http.Request) {
 type OpenRestyClient struct {
 	baseURL string
 	client  *http.Client
+}
+
+type DemoLoadGenerator struct {
+	gatewayURL string
+	client     *http.Client
+	jobs       chan string
+	queued     atomic.Int64
+	active     atomic.Int64
+}
+
+func newDemoLoadGenerator(ctx context.Context, gatewayURL string) *DemoLoadGenerator {
+	generator := &DemoLoadGenerator{
+		gatewayURL: gatewayURL,
+		client: &http.Client{Transport: &http.Transport{
+			MaxIdleConns:        demoMaxConcurrency,
+			MaxIdleConnsPerHost: demoMaxConcurrency,
+			MaxConnsPerHost:     demoMaxConcurrency,
+		}},
+		jobs: make(chan string, demoQueueSize),
+	}
+	for index := 0; index < demoMaxConcurrency; index++ {
+		go generator.runWorker(ctx)
+	}
+	return generator
+}
+
+func (g *DemoLoadGenerator) runWorker(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case path := <-g.jobs:
+			g.active.Add(1)
+			g.queued.Add(-1)
+			request, err := http.NewRequestWithContext(ctx, http.MethodGet, g.gatewayURL+path, nil)
+			if err == nil {
+				response, requestErr := g.client.Do(request)
+				if requestErr == nil {
+					_ = response.Body.Close()
+				}
+			}
+			g.active.Add(-1)
+		}
+	}
+}
+
+func (g *DemoLoadGenerator) submit(count int, path string) int {
+	accepted := 0
+	for index := 0; index < count; index++ {
+		g.queued.Add(1)
+		select {
+		case g.jobs <- path:
+			accepted++
+		default:
+			g.queued.Add(-1)
+			return accepted
+		}
+	}
+	return accepted
+}
+
+func (g *DemoLoadGenerator) status() map[string]int64 {
+	return map[string]int64{
+		"active": g.active.Load(),
+		"queued": g.queued.Load(),
+	}
 }
 
 func (c *OpenRestyClient) putConfig(config GatewayConfig) error {
@@ -687,6 +812,9 @@ func serveUDP(ctx context.Context, store *Store, hub *Hub) {
 		log.Fatalf("listen UDP: %v", err)
 	}
 	defer conn.Close()
+	if err := conn.SetReadBuffer(udpReadBufferBytes); err != nil {
+		log.Printf("set UDP telemetry receive buffer: %v", err)
+	}
 	go func() {
 		<-ctx.Done()
 		_ = conn.Close()
@@ -706,7 +834,7 @@ func serveUDP(ctx context.Context, store *Store, hub *Hub) {
 			continue
 		}
 		store.addEvent(event)
-		hub.broadcast(event)
+		hub.enqueue(event)
 	}
 }
 
@@ -727,7 +855,7 @@ func main() {
 	if gatewayURL == "" {
 		gatewayURL = "http://127.0.0.1:8088"
 	}
-	openresty := &OpenRestyClient{baseURL: adminURL, client: &http.Client{Timeout: 2 * time.Second}}
+	openresty := &OpenRestyClient{baseURL: adminURL, client: &http.Client{Timeout: 10 * time.Second}}
 	nativePolicy := newNativePolicyPublisher(os.Getenv("HTTPV_NATIVE_POLICY_PATH"))
 	auth := newAuthManagerFromEnv()
 	audit := newAuditLogger(os.Getenv("HTTPV_AUDIT_LOG_PATH"))
@@ -758,7 +886,7 @@ func main() {
 	go serveUDP(ctx, store, hub)
 	go hub.run(ctx)
 	go func() {
-		ticker := time.NewTicker(2 * time.Second)
+		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 		for {
 			if err := syncGatewayConfig(); err != nil {
@@ -910,30 +1038,33 @@ func main() {
 	r.Get("/api/policy-status", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, nativePolicy.status())
 	})
-	demoClient := &http.Client{}
+	demoGenerator := newDemoLoadGenerator(ctx, gatewayURL)
+	r.Get("/api/demo/status", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, demoGenerator.status())
+	})
 	r.Post("/api/demo/burst", func(w http.ResponseWriter, r *http.Request) {
 		var payload struct {
-			Count int `json:"count"`
+			Count int    `json:"count"`
+			Path  string `json:"path"`
 		}
 		if err := decodeJSON(r, &payload); err != nil || payload.Count < 1 || payload.Count > 100 {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "count must be 1-100"})
 			return
 		}
-		for index := 0; index < payload.Count; index++ {
-			go func() {
-				request, err := http.NewRequestWithContext(context.Background(), http.MethodGet, gatewayURL+"/", nil)
-				if err != nil {
-					return
-				}
-				// The manual gate owns the request lifetime. A fixed client timeout can
-				// race the gate timeout and abort the request just before its decision.
-				response, err := demoClient.Do(request)
-				if err == nil {
-					_ = response.Body.Close()
-				}
-			}()
+		if payload.Path == "" {
+			payload.Path = "/"
 		}
-		writeJSON(w, http.StatusAccepted, map[string]int{"accepted": payload.Count})
+		parsedPath, err := url.ParseRequestURI(payload.Path)
+		if err != nil || parsedPath.IsAbs() || parsedPath.Host != "" || !strings.HasPrefix(parsedPath.Path, "/") {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path must be a relative request path"})
+			return
+		}
+		accepted := demoGenerator.submit(payload.Count, payload.Path)
+		if accepted == 0 {
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "demo traffic queue is full"})
+			return
+		}
+		writeJSON(w, http.StatusAccepted, map[string]int{"accepted": accepted})
 	})
 	r.Put("/api/subjects/{id}", func(w http.ResponseWriter, r *http.Request) {
 		var subject Subject

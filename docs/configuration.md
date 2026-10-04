@@ -7,6 +7,9 @@ HTTPV uses one versioned gateway document with four ordered collections:
 - `subjects`: independent first-match traffic visualization and control scopes.
 - `rules`: runtime block rules, optionally scoped to one subject.
 
+`schema_version` is currently `1`. Unsupported schema versions are rejected
+before they can be synchronized to OpenResty.
+
 The default local file is [`config/httpv.json`](../config/httpv.json). An
 upstream URL must be an `http` or `https` origin without a path, query, or
 fragment. Request paths and query strings are preserved by the proxy.
@@ -30,6 +33,30 @@ matches before catch-all entries.
 Routing and traffic control are intentionally separate. A request can be
 routed without being displayed or gated, and multiple subjects can supervise
 different portions of one upstream.
+
+## Upstream pools
+
+An upstream may contain one or more weighted targets:
+
+```json
+{
+  "id": "orders",
+  "name": "Orders",
+  "targets": [
+    {"id": "orders-a", "url": "http://orders-a:8080", "host_header": "orders", "weight": 3},
+    {"id": "orders-b", "url": "http://orders-b:8080", "host_header": "orders", "weight": 1}
+  ],
+  "max_failures": 1,
+  "failure_timeout_ms": 10000
+}
+```
+
+Selection uses local weighted round-robin. A target returning 502, 503, or 504
+is placed into passive cooldown after `max_failures`; later requests skip it
+for `failure_timeout_ms`. HTTPV does not automatically replay the failed
+request, which avoids duplicating non-idempotent methods. If every target is in
+cooldown, requests are attempted across the full pool so recovery remains
+possible. Legacy `url` and `host_header` fields are migrated to one target.
 
 ## Manual-gate protection
 
@@ -86,6 +113,9 @@ An accepted document is validated, atomically persisted to the HTTPV runtime
 volume, published to the native policy snapshot, and synchronized to OpenResty.
 The runtime state takes precedence over the initial file after the first
 operator change or restart recovery.
+
+Administrators can perform the same validation, application, revision review,
+and rollback from the **Gateway configuration** workbench in the console.
 
 ## Revisions and rollback
 

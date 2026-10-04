@@ -9,4 +9,4 @@ publish = false
 bytes = "1"
 memmap2 = "0.9"
 socket2 = "0.6"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync", "io-util"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync", "io-util", "time"] }

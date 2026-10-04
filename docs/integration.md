@@ -10,8 +10,11 @@ For an application listening on the Docker host at `127.0.0.1:9998`, use:
 ```json
 {
   "id": "local-app",
-  "url": "http://host.docker.internal:9998",
-  "host_header": "127.0.0.1:9998"
+  "targets": [
+    {"id": "local-app-1", "url": "http://host.docker.internal:9998", "host_header": "127.0.0.1:9998", "weight": 1}
+  ],
+  "max_failures": 1,
+  "failure_timeout_ms": 10000
 }
 ```
 
@@ -42,8 +45,8 @@ original address, not back to the public listener.
 ```json
 {
   "upstreams": [
-    {"id": "orders", "name": "Orders", "url": "http://orders:8080", "host_header": "orders"},
-    {"id": "admin", "name": "Admin", "url": "http://admin:9000", "host_header": "admin"}
+    {"id": "orders", "name": "Orders", "targets": [{"id": "orders-1", "url": "http://orders:8080", "host_header": "orders", "weight": 1}], "max_failures": 1, "failure_timeout_ms": 10000},
+    {"id": "admin", "name": "Admin", "targets": [{"id": "admin-1", "url": "http://admin:9000", "host_header": "admin", "weight": 1}], "max_failures": 1, "failure_timeout_ms": 10000}
   ],
   "routes": [
     {"id": "admin-route", "name": "Admin", "enabled": true, "match": {"host": "admin.example.test", "path_prefix": "/", "method": ""}, "upstream_id": "admin"},
@@ -56,9 +59,8 @@ Route order matters. Put the catch-all route last.
 
 ## Compatibility checklist
 
-Before production use, verify the application's methods, request bodies, query
-strings, redirects, large responses, streaming endpoints, WebSockets, timeout
-behavior, and expected `Host` and `X-Forwarded-*` headers through port 8088.
-TLS termination, HTTP/2, gRPC, and WebSocket compatibility are not yet release
-claims and remain part of the product hardening test matrix.
-
+The isolated regression suite verifies GET/POST/PUT/PATCH/DELETE, query strings,
+headers, fixed and chunked request bodies, 2MiB uploads, redirects, 204/4xx
+statuses, unbuffered chunk streams, SSE, WebSocket echo, weighted targets, and
+passive failover. Validate application-specific timeout behavior and headers in
+your environment. TLS termination, HTTP/2, and gRPC are not yet release claims.
