@@ -21,13 +21,16 @@ type result struct {
 }
 
 type report struct {
-	URL         string         `json:"url"`
-	DurationMS  int64          `json:"duration_ms"`
-	Requests    uint64         `json:"requests"`
-	Errors      uint64         `json:"errors"`
-	RPS         float64        `json:"rps"`
-	LatencyMS   map[string]any `json:"latency_ms"`
-	StatusCodes map[int]uint64 `json:"status_codes"`
+	URL              string         `json:"url"`
+	TargetDurationMS int64          `json:"target_duration_ms"`
+	ElapsedMS        int64          `json:"elapsed_ms"`
+	Requests         uint64         `json:"requests"`
+	Successes        uint64         `json:"successes"`
+	Errors           uint64         `json:"errors"`
+	RPS              float64        `json:"rps"`
+	SuccessRPS       float64        `json:"success_rps"`
+	LatencyMS        map[string]any `json:"latency_ms"`
+	StatusCodes      map[int]uint64 `json:"status_codes"`
 }
 
 func percentile(values []time.Duration, percentile float64) float64 {
@@ -42,6 +45,13 @@ func percentile(values []time.Duration, percentile float64) float64 {
 		index = len(values) - 1
 	}
 	return float64(values[index]) / float64(time.Millisecond)
+}
+
+func dueRequests(elapsed time.Duration, rate int) int {
+	if rate <= 0 {
+		return 0
+	}
+	return 1 + int(float64(elapsed)*float64(rate)/float64(time.Second))
 }
 
 func main() {
@@ -64,7 +74,8 @@ func main() {
 		MaxConnsPerHost:     *concurrency * 2,
 	}
 	client := &http.Client{Transport: transport, Timeout: *timeout}
-	deadline := time.Now().Add(*duration)
+	runStarted := time.Now()
+	deadline := runStarted.Add(*duration)
 	jobs := make(chan struct{}, *concurrency*4)
 	results := make(chan result, *concurrency*4)
 	var workers sync.WaitGroup
@@ -103,9 +114,9 @@ func main() {
 			sent := 0
 			for time.Now().Before(deadline) {
 				elapsed := time.Since(started)
-				due := int(float64(elapsed) * float64(*rate) / float64(time.Second))
+				due := dueRequests(elapsed, *rate)
 				if due <= sent {
-					next := time.Duration(float64(sent+1) * float64(time.Second) / float64(*rate))
+					next := time.Duration(float64(sent) * float64(time.Second) / float64(*rate))
 					if wait := next - elapsed; wait > 0 {
 						time.Sleep(wait)
 					}
@@ -137,14 +148,19 @@ func main() {
 		latencies = append(latencies, item.latency)
 		statuses[item.status]++
 	}
+	elapsed := time.Since(runStarted)
+	successes := requests - errors
 
 	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
 	report := report{
-		URL:        *url,
-		DurationMS: duration.Milliseconds(),
-		Requests:   requests,
-		Errors:     errors,
-		RPS:        float64(requests) / duration.Seconds(),
+		URL:              *url,
+		TargetDurationMS: duration.Milliseconds(),
+		ElapsedMS:        elapsed.Milliseconds(),
+		Requests:         requests,
+		Successes:        successes,
+		Errors:           errors,
+		RPS:              float64(requests) / elapsed.Seconds(),
+		SuccessRPS:       float64(successes) / elapsed.Seconds(),
 		LatencyMS: map[string]any{
 			"p50": percentile(latencies, 0.50),
 			"p95": percentile(latencies, 0.95),
@@ -156,7 +172,7 @@ func main() {
 		_ = json.NewEncoder(os.Stdout).Encode(report)
 		return
 	}
-	fmt.Printf("requests=%d errors=%d rps=%.2f p50=%.2fms p95=%.2fms p99=%.2fms statuses=%v\n",
-		report.Requests, report.Errors, report.RPS,
+	fmt.Printf("requests=%d successes=%d errors=%d elapsed=%s rps=%.2f success_rps=%.2f p50=%.2fms p95=%.2fms p99=%.2fms statuses=%v\n",
+		report.Requests, report.Successes, report.Errors, elapsed.Round(time.Millisecond), report.RPS, report.SuccessRPS,
 		report.LatencyMS["p50"], report.LatencyMS["p95"], report.LatencyMS["p99"], report.StatusCodes)
 }

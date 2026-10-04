@@ -1,0 +1,34 @@
+name: Bug report
+description: Report reproducible HTTPV behavior
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Never include real credentials, cookies, request bodies, or customer traffic.
+  - type: input
+    id: version
+    attributes: {label: Version or commit, placeholder: v0.1.0 or commit SHA}
+    validations: {required: true}
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options: [OpenResty data plane, Native module, Edge agent, Control API, Web console, Deployment, Documentation]
+    validations: {required: true}
+  - type: textarea
+    id: reproduction
+    attributes: {label: Reproduction, description: Use synthetic data and include exact configuration needed to reproduce.}
+    validations: {required: true}
+  - type: textarea
+    id: expected
+    attributes: {label: Expected behavior}
+    validations: {required: true}
+  - type: textarea
+    id: actual
+    attributes: {label: Actual behavior}
+    validations: {required: true}
+  - type: textarea
+    id: environment
+    attributes: {label: Environment, description: OS, architecture, Docker/OpenResty version, browser, and load level.}
+

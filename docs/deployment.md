@@ -42,6 +42,13 @@ Optional variables:
 - `HTTPV_ADMIN_TOKEN`: required production administrator token.
 - `HTTPV_OPERATOR_TOKEN` and `HTTPV_VIEWER_TOKEN`: optional lower-privilege tokens.
 
+## Published images
+
+Tagged releases attach `compose.release.json` and a default `httpv.json`. The
+release Compose file pulls signed multi-architecture images from GHCR instead
+of compiling locally. Pin `HTTPV_VERSION` to the desired release. See
+[releasing](releasing.md) for image names and verification commands.
+
 ## State and backup
 
 The `httpv_runtime` volume contains the active configuration, native policy

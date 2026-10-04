@@ -1,0 +1,33 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: {interval: weekly}
+  - package-ecosystem: npm
+    directory: /web
+    schedule: {interval: weekly}
+  - package-ecosystem: gomod
+    directory: /control
+    schedule: {interval: weekly}
+  - package-ecosystem: gomod
+    directory: /demo
+    schedule: {interval: weekly}
+  - package-ecosystem: gomod
+    directory: /bench/loadgen
+    schedule: {interval: weekly}
+  - package-ecosystem: cargo
+    directory: /edge-agent
+    schedule: {interval: weekly}
+  - package-ecosystem: docker
+    directory: /control
+    schedule: {interval: weekly}
+  - package-ecosystem: docker
+    directory: /edge-agent
+    schedule: {interval: weekly}
+  - package-ecosystem: docker
+    directory: /openresty
+    schedule: {interval: weekly}
+  - package-ecosystem: docker
+    directory: /web
+    schedule: {interval: weekly}
+

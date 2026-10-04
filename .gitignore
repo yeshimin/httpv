@@ -3,5 +3,7 @@ web/dist/
 edge-agent/target/
 __pycache__/
 .pytest_cache/
+bench/results/*/*.json
+bench/results/*/environment.txt
 data/
 .DS_Store

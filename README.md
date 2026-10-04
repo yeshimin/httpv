@@ -1,5 +1,7 @@
 # HTTPV
 
+[![CI](https://github.com/yeshimin/httpv/actions/workflows/ci.yml/badge.svg)](https://github.com/yeshimin/httpv/actions/workflows/ci.yml)
+
 HTTPV is a single-node preview for real-time, per-request HTTP traffic visualization and control.
 
 The prototype keeps enforcement inside OpenResty. The Go control service and browser UI never sit on the request forwarding path.
@@ -15,7 +17,7 @@ The repository now includes a Rust edge agent between OpenResty and the control 
 Read [the architecture](docs/architecture.md), [configuration](docs/configuration.md),
 [deployment guide](docs/deployment.md), [integration guide](docs/integration.md),
 [security baseline](docs/security.md), [detail capture](docs/detail-capture.md),
-and [performance contract](docs/performance-contract.md)
+[release process](docs/releasing.md), and [performance contract](docs/performance-contract.md)
 before making data-path changes.
 
 ## Adaptive visualization
@@ -68,6 +70,9 @@ Use `compose.production.json` for the production-oriented single-node layout.
 It serves a prebuilt static console, keeps the Control API private, requires an
 administrator token, and adds health checks and restart policies. TLS
 termination, OIDC, and multi-node command routing are still deliberately deferred.
+
+Tagged releases also publish signed AMD64/ARM64 images and a no-build
+`compose.release.json` deployment. See [the release process](docs/releasing.md).
 
 ## Safety notes
 

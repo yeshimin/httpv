@@ -42,28 +42,14 @@ fn setting(name: &str, fallback: &str) -> String {
 }
 
 fn valid_phase(code: u8) -> bool {
-    match code {
-        1..=9 => true,
-        _ => false,
-    }
+    matches!(code, 1..=9)
 }
 
 fn valid_frame(frame: &[u8]) -> bool {
-    frame.len() >= HEADER_LENGTH && &frame[0..4] == b"HTVP" && frame[4] == 1 && valid_phase(frame[5])
-}
-
-#[cfg(test)]
-mod tests {
-    use super::valid_phase;
-
-    #[test]
-    fn accepts_all_protocol_phases() {
-        assert!(valid_phase(1));
-        assert!(valid_phase(8));
-        assert!(valid_phase(9));
-        assert!(!valid_phase(0));
-        assert!(!valid_phase(10));
-    }
+    frame.len() >= HEADER_LENGTH
+        && &frame[0..4] == b"HTVP"
+        && frame[4] == 1
+        && valid_phase(frame[5])
 }
 
 struct Ring {
@@ -84,18 +70,35 @@ impl Ring {
     fn open(path: &Path) -> io::Result<Self> {
         let file = fs::OpenOptions::new().read(true).write(true).open(path)?;
         let map = unsafe { MmapOptions::new().map_mut(&file)? };
-        if map.len() < RING_HEADER_LENGTH || &map[..4] != b"HTVR" || ring_u32(&map, 4) != RING_VERSION {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid HTTPV ring header"));
+        if map.len() < RING_HEADER_LENGTH
+            || &map[..4] != b"HTVR"
+            || ring_u32(&map, 4) != RING_VERSION
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid HTTPV ring header",
+            ));
         }
         let record_size = ring_u32(&map, 8) as usize;
         let capacity = ring_u32(&map, 12) as usize;
-        if record_size != RING_RECORD_SIZE || capacity == 0 || map.len() < RING_HEADER_LENGTH + record_size * capacity {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid HTTPV ring geometry"));
+        if record_size != RING_RECORD_SIZE
+            || capacity == 0
+            || map.len() < RING_HEADER_LENGTH + record_size * capacity
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid HTTPV ring geometry",
+            ));
         }
         Ok(Self { map, capacity })
     }
 
-    fn drain(&mut self, senders: &Arc<Vec<mpsc::Sender<Bytes>>>, cursor: &AtomicUsize, stats: &Stats) {
+    fn drain(
+        &mut self,
+        senders: &Arc<Vec<mpsc::Sender<Bytes>>>,
+        cursor: &AtomicUsize,
+        stats: &Stats,
+    ) {
         let write = ring_atomic(&self.map, RING_WRITE_OFFSET).load(Ordering::Acquire);
         let mut read = ring_atomic(&self.map, RING_READ_OFFSET).load(Ordering::Acquire);
         while read < write {
@@ -119,7 +122,12 @@ impl Ring {
     }
 }
 
-fn receive_rings(directory: String, senders: Arc<Vec<mpsc::Sender<Bytes>>>, cursor: Arc<AtomicUsize>, stats: Arc<Stats>) {
+fn receive_rings(
+    directory: String,
+    senders: Arc<Vec<mpsc::Sender<Bytes>>>,
+    cursor: Arc<AtomicUsize>,
+    stats: Arc<Stats>,
+) {
     let directory = PathBuf::from(directory);
     let mut rings: HashMap<PathBuf, Ring> = HashMap::new();
     let mut last_discovery = Instant::now() - Duration::from_secs(1);
@@ -128,7 +136,10 @@ fn receive_rings(directory: String, senders: Arc<Vec<mpsc::Sender<Bytes>>>, curs
             if let Ok(entries) = fs::read_dir(&directory) {
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    let is_ring = path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.starts_with("telemetry.ring."));
+                    let is_ring = path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with("telemetry.ring."));
                     if is_ring && !rings.contains_key(&path) {
                         if let Ok(ring) = Ring::open(&path) {
                             rings.insert(path, ring);
@@ -162,15 +173,20 @@ fn frame_shard(frame: &[u8], shards: usize) -> Option<usize> {
     if shards == 0 || frame.len() < HEADER_LENGTH + 2 || !valid_frame(frame) {
         return None;
     }
-    let request_id_length = usize::from(u16::from_be_bytes([frame[HEADER_LENGTH], frame[HEADER_LENGTH + 1]]));
+    let request_id_length = usize::from(u16::from_be_bytes([
+        frame[HEADER_LENGTH],
+        frame[HEADER_LENGTH + 1],
+    ]));
     let start = HEADER_LENGTH + 2;
     let end = start.checked_add(request_id_length)?;
     if end > frame.len() {
         return None;
     }
-    let hash = frame[start..end].iter().fold(2_166_136_261_u64, |hash, byte| {
-        (hash ^ u64::from(*byte)).wrapping_mul(16_777_619)
-    });
+    let hash = frame[start..end]
+        .iter()
+        .fold(2_166_136_261_u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(16_777_619)
+        });
     Some(hash as usize % shards)
 }
 
@@ -247,11 +263,19 @@ async fn receive_datagrams(
             stats.invalid_frames.fetch_add(1, Ordering::Relaxed);
             continue;
         }
-        enqueue(Bytes::copy_from_slice(&frame[..size]), &senders, &cursor, &stats);
+        enqueue(
+            Bytes::copy_from_slice(&frame[..size]),
+            &senders,
+            &cursor,
+            &stats,
+        );
     }
 }
 
-fn bind_native_datagram(path: &str, receive_buffer_bytes: usize) -> io::Result<(UnixDatagram, usize)> {
+fn bind_native_datagram(
+    path: &str,
+    receive_buffer_bytes: usize,
+) -> io::Result<(UnixDatagram, usize)> {
     let input = StdUnixDatagram::bind(path)?;
     let socket = SockRef::from(&input);
     socket.set_recv_buffer_size(receive_buffer_bytes)?;
@@ -270,7 +294,9 @@ async fn main() -> std::io::Result<()> {
         .unwrap_or(8_388_608);
     let control_address = setting("HTTPV_AGENT_CONTROL_ADDR", "control:9100");
     let metrics_address = setting("HTTPV_AGENT_METRICS_ADDR", "0.0.0.0:9102");
-    let queue_capacity = setting("HTTPV_AGENT_QUEUE_CAPACITY", "65536").parse().unwrap_or(65_536);
+    let queue_capacity = setting("HTTPV_AGENT_QUEUE_CAPACITY", "65536")
+        .parse()
+        .unwrap_or(65_536);
     let forward_workers = setting("HTTPV_AGENT_FORWARD_WORKERS", "4")
         .parse::<usize>()
         .unwrap_or(4)
@@ -290,20 +316,21 @@ async fn main() -> std::io::Result<()> {
     if Path::new(&native_socket_path).exists() {
         fs::remove_file(&native_socket_path)?;
     }
-    let (native_input, effective_native_socket_buffer_bytes) = bind_native_datagram(
-        &native_socket_path,
-        native_socket_buffer_bytes,
-    )?;
+    let (native_input, effective_native_socket_buffer_bytes) =
+        bind_native_datagram(&native_socket_path, native_socket_buffer_bytes)?;
     fs::set_permissions(&native_socket_path, fs::Permissions::from_mode(0o666))?;
     let output = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
-    let control_address = lookup_host(&control_address)
-        .await?
-        .next()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, "control address did not resolve"))?;
+    let control_address = lookup_host(&control_address).await?.next().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::AddrNotAvailable,
+            "control address did not resolve",
+        )
+    })?;
     let stats = Arc::new(Stats::default());
-    stats
-        .native_socket_buffer_bytes
-        .store(effective_native_socket_buffer_bytes as u64, Ordering::Relaxed);
+    stats.native_socket_buffer_bytes.store(
+        effective_native_socket_buffer_bytes as u64,
+        Ordering::Relaxed,
+    );
     let queue_per_worker = (queue_capacity / forward_workers).max(1);
     let mut sender_list = Vec::with_capacity(forward_workers);
     for _ in 0..forward_workers {
@@ -349,5 +376,19 @@ async fn main() -> std::io::Result<()> {
             Arc::clone(&forward_cursor),
             Arc::clone(&stats),
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_phase;
+
+    #[test]
+    fn accepts_all_protocol_phases() {
+        assert!(valid_phase(1));
+        assert!(valid_phase(8));
+        assert!(valid_phase(9));
+        assert!(!valid_phase(0));
+        assert!(!valid_phase(10));
     }
 }

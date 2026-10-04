@@ -1,0 +1,6 @@
+*
+!openresty/
+!openresty/**
+!native/
+!native/ngx_http_httpv_module/
+!native/ngx_http_httpv_module/**
