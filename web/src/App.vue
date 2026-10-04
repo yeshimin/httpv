@@ -53,7 +53,7 @@ const messages: Record<Locale, Record<string, string>> = {
     requestHeaders: '请求 Header', responseHeaders: '响应 Header', requestBody: '请求 Body', responseBody: '响应 Body',
     captureOff: '内容采集尚未开启。后续将按规则限长、脱敏并默认关闭。', managedSubject: '监管对象', topology: '{routes} 条路由 · {upstreams} 个上游',
     signIn: '登录 HTTPV', accessToken: '访问 Token', signInAction: '登录', invalidToken: 'Token 无效或登录失败', signOut: '退出', roleViewer: '只读', roleOperator: '操作员', roleAdmin: '管理员',
-    captureSettings: '详情采集', captureEnabled: '开启采集', captureRequestHeaders: '请求 Header', captureResponseHeaders: '响应 Header', captureRequestBody: '请求 Body', captureResponseBody: '响应 Body', captureLimit: 'Body 上限', captureTTL: '保留秒数', captureSample: '采样率', captureSensitive: '采集内容可能包含敏感数据；强制脱敏鉴权与 Cookie Header。', captureLoading: '正在读取详情…', captureUnavailable: '该请求未采集详情、已过期或当前角色无权读取。', captureTruncated: '内容已截断',
+    captureSettings: '详情采集', captureStateOn: '已开启', captureStateOff: '已关闭 · 点击配置', captureEnabled: '开启采集', captureRequestHeaders: '请求 Header', captureResponseHeaders: '响应 Header', captureRequestBody: '请求 Body', captureResponseBody: '响应 Body', captureLimit: 'Body 上限', captureTTL: '保留秒数', captureSample: '采样率', captureContentTypes: '允许采集 Body 的 Content-Type（逗号分隔）', captureRedactHeaders: '附加脱敏 Header（逗号分隔）', captureSensitive: '采集内容可能包含敏感数据；鉴权与 Cookie Header 始终强制脱敏。只对保存后的新请求生效。', captureLoading: '正在读取详情…', captureUnavailable: '该请求未采集详情、已过期或当前角色无权读取。', captureTruncated: '内容已截断', saveFailed: '保存失败',
     gatewayConfig: '网关配置', configValidate: '校验', configApply: '应用配置', configValid: '配置有效', configApplied: '配置已应用', configInvalid: '配置无效', configHistory: '版本历史', configRollback: '回滚', configClose: '关闭', confirmRollback: '确认回滚到版本 {revision}？回滚会生成一个新版本。'
   },
   en: {
@@ -82,7 +82,7 @@ const messages: Record<Locale, Record<string, string>> = {
     requestHeaders: 'Request headers', responseHeaders: 'Response headers', requestBody: 'Request body', responseBody: 'Response body',
     captureOff: 'Content capture is not enabled. It will be opt-in, size-limited, and redacted.', managedSubject: 'Managed subject', topology: '{routes} routes · {upstreams} upstreams',
     signIn: 'Sign in to HTTPV', accessToken: 'Access token', signInAction: 'Sign in', invalidToken: 'Invalid token or sign-in failed', signOut: 'Sign out', roleViewer: 'viewer', roleOperator: 'operator', roleAdmin: 'admin',
-    captureSettings: 'Detail capture', captureEnabled: 'Enable capture', captureRequestHeaders: 'Request headers', captureResponseHeaders: 'Response headers', captureRequestBody: 'Request body', captureResponseBody: 'Response body', captureLimit: 'Body limit', captureTTL: 'Retention seconds', captureSample: 'Sample rate', captureSensitive: 'Captured content may be sensitive; authentication and cookie headers are always redacted.', captureLoading: 'Loading details…', captureUnavailable: 'Details were not captured, have expired, or are not available to this role.', captureTruncated: 'Content truncated',
+    captureSettings: 'Detail capture', captureStateOn: 'enabled', captureStateOff: 'disabled · click to configure', captureEnabled: 'Enable capture', captureRequestHeaders: 'Request headers', captureResponseHeaders: 'Response headers', captureRequestBody: 'Request body', captureResponseBody: 'Response body', captureLimit: 'Body limit', captureTTL: 'Retention seconds', captureSample: 'Sample rate', captureContentTypes: 'Body Content-Types to capture (comma-separated)', captureRedactHeaders: 'Additional redacted headers (comma-separated)', captureSensitive: 'Captured content may be sensitive; authentication and cookie headers are always redacted. Changes apply only to new requests.', captureLoading: 'Loading details…', captureUnavailable: 'Details were not captured, have expired, or are not available to this role.', captureTruncated: 'Content truncated', saveFailed: 'Save failed',
     gatewayConfig: 'Gateway configuration', configValidate: 'Validate', configApply: 'Apply configuration', configValid: 'Configuration is valid', configApplied: 'Configuration applied', configInvalid: 'Invalid configuration', configHistory: 'Revision history', configRollback: 'Rollback', configClose: 'Close', confirmRollback: 'Rollback to revision {revision}? Rollback creates a new revision.'
   }
 }
@@ -450,10 +450,24 @@ async function saveSubject() {
   const response = await apiFetch(`/api/subjects/${encodeURIComponent(subject.value.id)}`, {
     method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(subject.value)
   })
-  if (!response.ok) { alert('OpenResty has not accepted the configuration yet.'); return }
+  if (!response.ok) {
+    const reason = await readError(response)
+    alert(`${t('saveFailed')}: ${reason}`)
+    await bootstrap()
+    return
+  }
   const applied = await response.json() as Subject
   subject.value = applied
   subjects.value = subjects.value.map((candidate) => candidate.id === applied.id ? applied : candidate)
+}
+
+async function updateCaptureList(field: 'content_types' | 'redact_headers', event: Event) {
+  const values = (event.target as HTMLInputElement).value
+    .split(',')
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean)
+  subject.value.capture[field] = [...new Set(values)]
+  await saveSubject()
 }
 
 async function toggleGate() {
@@ -748,7 +762,7 @@ onBeforeUnmount(() => {
             <label class="switch"><input v-model="subject.display" :disabled="!canAdmin" type="checkbox" @change="saveSubject" /><span>{{ t('showEvents') }}</span></label>
           </div>
           <details class="capture-config">
-            <summary>{{ t('captureSettings') }}</summary>
+            <summary>{{ t('captureSettings') }} · {{ subject.capture.enabled ? t('captureStateOn') : t('captureStateOff') }}</summary>
             <div class="capture-switches">
               <label class="switch"><input v-model="subject.capture.enabled" :disabled="!canAdmin" type="checkbox" @change="saveSubject" /><span>{{ t('captureEnabled') }}</span></label>
               <label class="switch"><input v-model="subject.capture.request_headers" :disabled="!canAdmin" type="checkbox" @change="saveSubject" /><span>{{ t('captureRequestHeaders') }}</span></label>
@@ -760,6 +774,10 @@ onBeforeUnmount(() => {
               <label><span>{{ t('captureLimit') }}</span><input v-model.number="subject.capture.max_body_bytes" :disabled="!canAdmin" min="1" max="1048576" step="1024" type="number" @change="saveSubject" /></label>
               <label><span>{{ t('captureTTL') }}</span><input v-model.number="subject.capture.ttl_seconds" :disabled="!canAdmin" min="1" max="3600" step="10" type="number" @change="saveSubject" /></label>
               <label><span>{{ t('captureSample') }}</span><input v-model.number="subject.capture.sample_rate" :disabled="!canAdmin" min="0.01" max="1" step="0.05" type="number" @change="saveSubject" /></label>
+            </div>
+            <div class="capture-list-fields">
+              <label><span>{{ t('captureContentTypes') }}</span><input :value="subject.capture.content_types.join(', ')" :disabled="!canAdmin" @change="updateCaptureList('content_types', $event)" /></label>
+              <label><span>{{ t('captureRedactHeaders') }}</span><input :value="subject.capture.redact_headers.join(', ')" :disabled="!canAdmin" @change="updateCaptureList('redact_headers', $event)" /></label>
             </div>
             <p class="capture-warning">{{ t('captureSensitive') }}</p>
           </details>
