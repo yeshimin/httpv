@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -85,6 +86,23 @@ func TestRequestRankingsSortByRequestStarts(t *testing.T) {
 	}
 	if rankings[1].Method != "GET" || rankings[1].Path != "/products" || rankings[1].Count != 1 {
 		t.Fatalf("unexpected second ranking: %#v", rankings[1])
+	}
+}
+
+func TestRequestRankingsRetainMoreThanDisplayLimit(t *testing.T) {
+	store := newStore()
+	const total = 5_000
+	for index := 0; index < total; index++ {
+		store.addEvent(TrafficEvent{Phase: "request_started", Method: "GET", Path: fmt.Sprintf("/catalog/%d", index)})
+	}
+	if got := store.requestRankingTotal(); got != total {
+		t.Fatalf("tracked %d request paths, want %d", got, total)
+	}
+	if got := len(store.requestRankings(20)); got != 20 {
+		t.Fatalf("displayed %d rankings, want 20", got)
+	}
+	if got := len(store.requestRankings(-1)); got != total {
+		t.Fatalf("returned %d rankings for unlimited query, want %d", got, total)
 	}
 }
 

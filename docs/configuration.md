@@ -146,3 +146,20 @@ up to 32 compatible block rules. Configurations with multiple subjects remain
 fully functional but use the Lua compatibility path. This avoids applying one
 subject's native rule to another subject while the multi-subject native format
 is developed.
+
+## Request ranking retention
+
+The control service counts every distinct HTTP method and path observed during
+its current process lifetime. The console requests only the leading 20 entries,
+but lower-ranked entries are retained in memory and can be queried later with a
+different `limit`:
+
+```sh
+curl -fsS 'http://127.0.0.1:5173/api/request-rankings?limit=100'
+```
+
+Use `limit=-1` to return all current entries. Rankings contain method, path, and
+count only; they do not retain headers or bodies. Counts reset when the control
+service restarts. Deployments with unbounded, high-cardinality literal paths
+should normalize route parameters before long-running production use or export
+the counts to a persistent metrics backend.

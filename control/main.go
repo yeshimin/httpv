@@ -25,7 +25,6 @@ import (
 
 const (
 	maxRecentEvents         = 2_000
-	maxRankedRequestPaths   = 4_096
 	defaultVisualDetailRate = 360
 	visualSummaryInterval   = 500 * time.Millisecond
 	visualRecordTTL         = time.Minute
@@ -275,13 +274,11 @@ func (s *Store) addEvent(event TrafficEvent) {
 			path = "/"
 		}
 		key := method + "\x00" + path
-		ranking, exists := s.requestCounts[key]
-		if exists || len(s.requestCounts) < maxRankedRequestPaths {
-			ranking.Method = method
-			ranking.Path = path
-			ranking.Count++
-			s.requestCounts[key] = ranking
-		}
+		ranking := s.requestCounts[key]
+		ranking.Method = method
+		ranking.Path = path
+		ranking.Count++
+		s.requestCounts[key] = ranking
 	}
 	if len(s.events) < maxRecentEvents {
 		s.events = append(s.events, event)
@@ -294,7 +291,7 @@ func (s *Store) addEvent(event TrafficEvent) {
 func (s *Store) requestRankings(limit int) []RequestRanking {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if limit <= 0 || limit > 100 {
+	if limit == 0 {
 		limit = 20
 	}
 	rankings := make([]RequestRanking, 0, len(s.requestCounts))
@@ -310,10 +307,16 @@ func (s *Store) requestRankings(limit int) []RequestRanking {
 		}
 		return rankings[i].Path < rankings[j].Path
 	})
-	if len(rankings) > limit {
+	if limit > 0 && len(rankings) > limit {
 		rankings = rankings[:limit]
 	}
 	return rankings
+}
+
+func (s *Store) requestRankingTotal() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.requestCounts)
 }
 
 func (s *Store) recentEvents(limit int) []TrafficEvent {
@@ -1000,6 +1003,7 @@ func main() {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"config": store.config(), "config_revision": store.configRevision(),
 			"events": store.recentEvents(500), "request_rankings": store.requestRankings(20),
+			"request_ranking_total": store.requestRankingTotal(),
 		})
 	})
 	r.Get("/api/config", func(w http.ResponseWriter, r *http.Request) {
@@ -1066,7 +1070,9 @@ func main() {
 	})
 	r.Get("/api/events", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, http.StatusOK, store.recentEvents(500)) })
 	r.Get("/api/request-rankings", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"rankings": store.requestRankings(auditLimit(r))})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"rankings": store.requestRankings(auditLimit(r)), "total": store.requestRankingTotal(),
+		})
 	})
 	r.Get("/api/policy-status", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, nativePolicy.status())
