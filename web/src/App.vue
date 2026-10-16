@@ -56,7 +56,7 @@ const messages: Record<Locale, Record<string, string>> = {
     signIn: '登录 HTTPV', accessToken: '访问 Token', signInAction: '登录', invalidToken: 'Token 无效或登录失败', signOut: '退出', roleViewer: '只读', roleOperator: '操作员', roleAdmin: '管理员',
     captureSettings: '详情采集', captureStateOn: '已开启', captureStateOff: '已关闭 · 点击配置', captureEnabled: '开启采集', captureRequestHeaders: '请求 Header', captureResponseHeaders: '响应 Header', captureRequestBody: '请求 Body', captureResponseBody: '响应 Body', captureLimit: 'Body 上限', captureTTL: '保留秒数', captureSample: '采样率', captureContentTypes: '允许采集 Body 的 Content-Type（逗号分隔）', captureRedactHeaders: '附加脱敏 Header（逗号分隔）', captureSensitive: '采集内容可能包含敏感数据；鉴权与 Cookie Header 始终强制脱敏。只对保存后的新请求生效。', captureLoading: '正在读取详情…', captureUnavailable: '该请求未采集详情、已过期或当前角色无权读取。', captureTruncated: '内容已截断', saveFailed: '保存失败',
     gatewayConfig: '网关配置', configValidate: '校验', configApply: '应用配置', configValid: '配置有效', configApplied: '配置已应用', configInvalid: '配置无效', configHistory: '版本历史', configRollback: '回滚', configClose: '关闭', confirmRollback: '确认回滚到版本 {revision}？回滚会生成一个新版本。',
-    requestRanking: '请求排行', requestRankingScope: '本次运行 · 展示 {shown}/{total}', requestCount: '{count} 次', noRequestRanking: '暂无请求数据。'
+    requestRanking: '请求排行', requestRankingScope: '本次运行 · 展示 {shown}/{total}', requestCount: '{count} 次', noRequestRanking: '暂无请求数据。', clearRequestRanking: '清空', confirmClearRequestRanking: '确认清空本次运行的全部请求排行计数？该操作不会影响真实流量、请求详情或规则。'
   },
   en: {
     commandSurface: 'Traffic command surface', connecting: 'connecting', live: 'live', closed: 'closed',
@@ -86,7 +86,7 @@ const messages: Record<Locale, Record<string, string>> = {
     signIn: 'Sign in to HTTPV', accessToken: 'Access token', signInAction: 'Sign in', invalidToken: 'Invalid token or sign-in failed', signOut: 'Sign out', roleViewer: 'viewer', roleOperator: 'operator', roleAdmin: 'admin',
     captureSettings: 'Detail capture', captureStateOn: 'enabled', captureStateOff: 'disabled · click to configure', captureEnabled: 'Enable capture', captureRequestHeaders: 'Request headers', captureResponseHeaders: 'Response headers', captureRequestBody: 'Request body', captureResponseBody: 'Response body', captureLimit: 'Body limit', captureTTL: 'Retention seconds', captureSample: 'Sample rate', captureContentTypes: 'Body Content-Types to capture (comma-separated)', captureRedactHeaders: 'Additional redacted headers (comma-separated)', captureSensitive: 'Captured content may be sensitive; authentication and cookie headers are always redacted. Changes apply only to new requests.', captureLoading: 'Loading details…', captureUnavailable: 'Details were not captured, have expired, or are not available to this role.', captureTruncated: 'Content truncated', saveFailed: 'Save failed',
     gatewayConfig: 'Gateway configuration', configValidate: 'Validate', configApply: 'Apply configuration', configValid: 'Configuration is valid', configApplied: 'Configuration applied', configInvalid: 'Invalid configuration', configHistory: 'Revision history', configRollback: 'Rollback', configClose: 'Close', confirmRollback: 'Rollback to revision {revision}? Rollback creates a new revision.',
-    requestRanking: 'Request ranking', requestRankingScope: 'current run · showing {shown}/{total}', requestCount: '{count} requests', noRequestRanking: 'No request data yet.'
+    requestRanking: 'Request ranking', requestRankingScope: 'current run · showing {shown}/{total}', requestCount: '{count} requests', noRequestRanking: 'No request data yet.', clearRequestRanking: 'Clear', confirmClearRequestRanking: 'Clear every request-ranking count for this run? This does not affect live traffic, request details, or rules.'
   }
 }
 
@@ -381,6 +381,19 @@ async function refreshRequestRankings() {
   } catch {
     // Rankings are observational and must not affect request control.
   }
+}
+
+async function clearRequestRankings() {
+  if (!window.confirm(t('confirmClearRequestRanking'))) return
+  const response = await apiFetch('/api/request-rankings', {
+    method: 'DELETE', headers: { 'X-HTTPV-Confirm': 'clear-request-rankings' }
+  })
+  if (!response.ok) {
+    alert(`${t('saveFailed')}: ${await readError(response)}`)
+    return
+  }
+  requestRankings.value = []
+  requestRankingTotal.value = 0
 }
 
 async function refreshConfigRevisions() {
@@ -858,7 +871,7 @@ onBeforeUnmount(() => {
       </article>
 
         <article class="panel ranking-panel">
-          <div class="panel-title ranking-title"><h2>{{ t('requestRanking') }}</h2><small>{{ t('requestRankingScope', { shown: requestRankings.length, total: requestRankingTotal }) }}</small></div>
+          <div class="panel-title ranking-title"><div><h2>{{ t('requestRanking') }}</h2><small>{{ t('requestRankingScope', { shown: requestRankings.length, total: requestRankingTotal }) }}</small></div><button class="ranking-clear" :disabled="!canOperate || requestRankingTotal === 0" @click="clearRequestRankings">{{ t('clearRequestRanking') }}</button></div>
           <p v-if="requestRankings.length === 0" class="hint">{{ t('noRequestRanking') }}</p>
           <div v-else class="ranking-list">
             <div v-for="(ranking, index) in requestRankings" :key="`${ranking.method}:${ranking.path}`" class="ranking-row" :title="`${ranking.method} ${ranking.path}`">

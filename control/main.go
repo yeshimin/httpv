@@ -319,6 +319,14 @@ func (s *Store) requestRankingTotal() int {
 	return len(s.requestCounts)
 }
 
+func (s *Store) clearRequestRankings() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cleared := len(s.requestCounts)
+	s.requestCounts = map[string]RequestRanking{}
+	return cleared
+}
+
 func (s *Store) recentEvents(limit int) []TrafficEvent {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -1073,6 +1081,15 @@ func main() {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"rankings": store.requestRankings(auditLimit(r)), "total": store.requestRankingTotal(),
 		})
+	})
+	r.Delete("/api/request-rankings", func(w http.ResponseWriter, r *http.Request) {
+		if !requireConfirmation(w, r, "clear-request-rankings") {
+			audit.record(r, "request-rankings.clear", "", "rejected")
+			return
+		}
+		cleared := store.clearRequestRankings()
+		audit.record(r, "request-rankings.clear", strconv.Itoa(cleared), "success")
+		writeJSON(w, http.StatusOK, map[string]int{"cleared": cleared})
 	})
 	r.Get("/api/policy-status", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, nativePolicy.status())

@@ -106,6 +106,21 @@ func TestRequestRankingsRetainMoreThanDisplayLimit(t *testing.T) {
 	}
 }
 
+func TestClearRequestRankings(t *testing.T) {
+	store := newStore()
+	store.addEvent(TrafficEvent{Phase: "request_started", Method: "GET", Path: "/products"})
+	store.addEvent(TrafficEvent{Phase: "request_started", Method: "POST", Path: "/orders"})
+	if cleared := store.clearRequestRankings(); cleared != 2 {
+		t.Fatalf("cleared %d rankings, want 2", cleared)
+	}
+	if total := store.requestRankingTotal(); total != 0 {
+		t.Fatalf("ranking total is %d after clear, want 0", total)
+	}
+	if rankings := store.requestRankings(20); len(rankings) != 0 {
+		t.Fatalf("got rankings after clear: %#v", rankings)
+	}
+}
+
 func TestTrafficSummaryKeepsTopPathsAndControlSignals(t *testing.T) {
 	accumulator := &trafficSummaryAccumulator{paths: map[string]*TrafficPathSummary{}}
 	accumulator.add(TrafficEvent{Phase: "request_started", TimestampMS: 100, SubjectID: "demo", Method: "GET", Path: "/hot"})

@@ -191,7 +191,7 @@ func requiredRole(r *http.Request) Role {
 		return RoleViewer
 	}
 	path := r.URL.Path
-	if strings.HasPrefix(path, "/api/pending/") || strings.HasPrefix(path, "/api/rules") || path == "/api/demo/burst" {
+	if strings.HasPrefix(path, "/api/pending/") || strings.HasPrefix(path, "/api/rules") || path == "/api/demo/burst" || path == "/api/request-rankings" {
 		return RoleOperator
 	}
 	return RoleAdmin
