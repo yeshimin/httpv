@@ -71,7 +71,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ matrix.name }}
           provenance: mode=max
           sbom: true
-      - uses: sigstore/cosign-installer@v4.1.0
+      - uses: sigstore/cosign-installer@v4.1.2
       - name: Keyless-sign image digest
         env:
           IMAGE: ${{ matrix.image }}
