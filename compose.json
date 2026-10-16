@@ -5,7 +5,6 @@
       "build": "./control",
       "environment": {
         "HTTPV_VISUAL_DETAIL_STARTS_PER_SEC": "360",
-        "HTTPV_DEMO_MAX_CONCURRENCY": "4096",
         "HTTPV_OPENRESTY_ADMIN_URL": "http://openresty:8091",
         "HTTPV_GATEWAY_URL": "http://openresty:8088",
         "HTTPV_NATIVE_POLICY_PATH": "/run/httpv/policy.bin",

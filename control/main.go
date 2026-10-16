@@ -31,9 +31,6 @@ const (
 	hubPriorityQueueSize    = 2_048
 	hubDetailQueueSize      = 16_384
 	udpReadBufferBytes      = 16 << 20
-	defaultDemoConcurrency  = 128
-	maximumDemoConcurrency  = 4_096
-	demoQueueSize           = 4_096
 )
 
 type Match struct {
@@ -510,75 +507,45 @@ type OpenRestyClient struct {
 }
 
 type DemoLoadGenerator struct {
-	gatewayURL  string
-	client      *http.Client
-	jobs        chan string
-	concurrency int64
-	queued      atomic.Int64
-	active      atomic.Int64
+	gatewayURL string
+	client     *http.Client
+	active     atomic.Int64
+	ctx        context.Context
 }
 
 func newDemoLoadGenerator(ctx context.Context, gatewayURL string) *DemoLoadGenerator {
-	concurrency := defaultDemoConcurrency
-	if configured, err := strconv.Atoi(os.Getenv("HTTPV_DEMO_MAX_CONCURRENCY")); err == nil && configured > 0 {
-		concurrency = min(configured, maximumDemoConcurrency)
-	}
-	generator := &DemoLoadGenerator{
+	return &DemoLoadGenerator{
 		gatewayURL: gatewayURL,
-		client: &http.Client{Transport: &http.Transport{
-			MaxIdleConns:        concurrency,
-			MaxIdleConnsPerHost: concurrency,
-			MaxConnsPerHost:     concurrency,
-		}},
-		jobs:        make(chan string, demoQueueSize),
-		concurrency: int64(concurrency),
+		client:     &http.Client{},
+		ctx:        ctx,
 	}
-	for index := 0; index < concurrency; index++ {
-		go generator.runWorker(ctx)
-	}
-	return generator
 }
 
-func (g *DemoLoadGenerator) runWorker(ctx context.Context) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case path := <-g.jobs:
-			g.active.Add(1)
-			g.queued.Add(-1)
-			request, err := http.NewRequestWithContext(ctx, http.MethodGet, g.gatewayURL+path, nil)
-			if err == nil {
-				response, requestErr := g.client.Do(request)
-				if requestErr == nil {
-					_ = response.Body.Close()
-				}
-			}
-			g.active.Add(-1)
-		}
+func (g *DemoLoadGenerator) run(path string) {
+	defer g.active.Add(-1)
+	request, err := http.NewRequestWithContext(g.ctx, http.MethodGet, g.gatewayURL+path, nil)
+	if err != nil {
+		return
+	}
+	response, err := g.client.Do(request)
+	if err == nil {
+		_ = response.Body.Close()
 	}
 }
 
 func (g *DemoLoadGenerator) submit(count int, path string) int {
-	accepted := 0
 	for index := 0; index < count; index++ {
-		g.queued.Add(1)
-		select {
-		case g.jobs <- path:
-			accepted++
-		default:
-			g.queued.Add(-1)
-			return accepted
-		}
+		g.active.Add(1)
+		go g.run(path)
 	}
-	return accepted
+	return count
 }
 
 func (g *DemoLoadGenerator) status() map[string]int64 {
 	return map[string]int64{
 		"active":          g.active.Load(),
-		"queued":          g.queued.Load(),
-		"max_concurrency": g.concurrency,
+		"queued":          0,
+		"max_concurrency": 0,
 	}
 }
 
