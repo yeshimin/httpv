@@ -54,6 +54,9 @@ Optional variables:
 - `HTTPV_VISUAL_DETAIL_STARTS_PER_SEC`: per-browser ceiling for new request
   animations before ordinary events are summarized; default `360`. Pending and
   operator-decision events remain individually visible.
+- `HTTPV_DEMO_MAX_CONCURRENCY`: maximum number of simultaneous requests created
+  by the built-in demo traffic generator. Production defaults to `128`; the
+  local development Compose uses `4096` for high-concurrency acceptance tests.
 
 Request and response buffering are disabled so uploads, chunk streams, SSE, and
 WebSocket Upgrade can pass through without waiting for a complete body. Choose

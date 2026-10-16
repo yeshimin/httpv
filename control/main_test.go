@@ -149,6 +149,7 @@ func TestHubReadsVisualDetailRate(t *testing.T) {
 }
 
 func TestDemoLoadGeneratorReportsActiveAndIdle(t *testing.T) {
+	t.Setenv("HTTPV_DEMO_MAX_CONCURRENCY", "3")
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -161,6 +162,9 @@ func TestDemoLoadGeneratorReportsActiveAndIdle(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	generator := newDemoLoadGenerator(ctx, server.URL)
+	if maximum := generator.status()["max_concurrency"]; maximum != 3 {
+		t.Fatalf("expected configured concurrency 3, got %d", maximum)
+	}
 	if accepted := generator.submit(1, "/probe"); accepted != 1 {
 		t.Fatalf("expected one accepted job, got %d", accepted)
 	}

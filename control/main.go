@@ -31,7 +31,8 @@ const (
 	hubPriorityQueueSize    = 2_048
 	hubDetailQueueSize      = 16_384
 	udpReadBufferBytes      = 16 << 20
-	demoMaxConcurrency      = 128
+	defaultDemoConcurrency  = 128
+	maximumDemoConcurrency  = 4_096
 	demoQueueSize           = 4_096
 )
 
@@ -509,24 +510,30 @@ type OpenRestyClient struct {
 }
 
 type DemoLoadGenerator struct {
-	gatewayURL string
-	client     *http.Client
-	jobs       chan string
-	queued     atomic.Int64
-	active     atomic.Int64
+	gatewayURL  string
+	client      *http.Client
+	jobs        chan string
+	concurrency int64
+	queued      atomic.Int64
+	active      atomic.Int64
 }
 
 func newDemoLoadGenerator(ctx context.Context, gatewayURL string) *DemoLoadGenerator {
+	concurrency := defaultDemoConcurrency
+	if configured, err := strconv.Atoi(os.Getenv("HTTPV_DEMO_MAX_CONCURRENCY")); err == nil && configured > 0 {
+		concurrency = min(configured, maximumDemoConcurrency)
+	}
 	generator := &DemoLoadGenerator{
 		gatewayURL: gatewayURL,
 		client: &http.Client{Transport: &http.Transport{
-			MaxIdleConns:        demoMaxConcurrency,
-			MaxIdleConnsPerHost: demoMaxConcurrency,
-			MaxConnsPerHost:     demoMaxConcurrency,
+			MaxIdleConns:        concurrency,
+			MaxIdleConnsPerHost: concurrency,
+			MaxConnsPerHost:     concurrency,
 		}},
-		jobs: make(chan string, demoQueueSize),
+		jobs:        make(chan string, demoQueueSize),
+		concurrency: int64(concurrency),
 	}
-	for index := 0; index < demoMaxConcurrency; index++ {
+	for index := 0; index < concurrency; index++ {
 		go generator.runWorker(ctx)
 	}
 	return generator
@@ -569,8 +576,9 @@ func (g *DemoLoadGenerator) submit(count int, path string) int {
 
 func (g *DemoLoadGenerator) status() map[string]int64 {
 	return map[string]int64{
-		"active": g.active.Load(),
-		"queued": g.queued.Load(),
+		"active":          g.active.Load(),
+		"queued":          g.queued.Load(),
+		"max_concurrency": g.concurrency,
 	}
 }
 
