@@ -164,6 +164,10 @@ service restarts. Deployments with unbounded, high-cardinality literal paths
 should normalize route parameters before long-running production use or export
 the counts to a persistent metrics backend.
 
+The endpoint also accepts `offset`, allowing the console's full-ranking dialog
+to page through the retained entries without rendering the complete set at
+once, for example `?offset=50&limit=50`.
+
 Operators can clear the in-memory ranking without affecting traffic, request
 details, configuration, or rules. The console asks for confirmation; API calls
 must use `DELETE /api/request-rankings` with

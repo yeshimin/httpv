@@ -77,7 +77,7 @@ func TestRequestRankingsSortByRequestStarts(t *testing.T) {
 		store.addEvent(TrafficEvent{Phase: "response_finished", Method: "POST", Path: "/orders"})
 	}
 	store.addEvent(TrafficEvent{Phase: "request_started", Method: "GET", Path: "/products"})
-	rankings := store.requestRankings(20)
+	rankings := store.requestRankings(0, 20)
 	if len(rankings) != 2 {
 		t.Fatalf("got %d rankings, want 2", len(rankings))
 	}
@@ -98,11 +98,17 @@ func TestRequestRankingsRetainMoreThanDisplayLimit(t *testing.T) {
 	if got := store.requestRankingTotal(); got != total {
 		t.Fatalf("tracked %d request paths, want %d", got, total)
 	}
-	if got := len(store.requestRankings(20)); got != 20 {
+	if got := len(store.requestRankings(0, 20)); got != 20 {
 		t.Fatalf("displayed %d rankings, want 20", got)
 	}
-	if got := len(store.requestRankings(-1)); got != total {
+	if got := len(store.requestRankings(0, -1)); got != total {
 		t.Fatalf("returned %d rankings for unlimited query, want %d", got, total)
+	}
+	if got := len(store.requestRankings(4_950, 50)); got != 50 {
+		t.Fatalf("returned %d rankings for final page, want 50", got)
+	}
+	if got := len(store.requestRankings(total, 50)); got != 0 {
+		t.Fatalf("returned %d rankings past the final page, want 0", got)
 	}
 }
 
@@ -116,7 +122,7 @@ func TestClearRequestRankings(t *testing.T) {
 	if total := store.requestRankingTotal(); total != 0 {
 		t.Fatalf("ranking total is %d after clear, want 0", total)
 	}
-	if rankings := store.requestRankings(20); len(rankings) != 0 {
+	if rankings := store.requestRankings(0, 20); len(rankings) != 0 {
 		t.Fatalf("got rankings after clear: %#v", rankings)
 	}
 }

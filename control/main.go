@@ -288,9 +288,12 @@ func (s *Store) addEvent(event TrafficEvent) {
 	s.eventStart = (s.eventStart + 1) % maxRecentEvents
 }
 
-func (s *Store) requestRankings(limit int) []RequestRanking {
+func (s *Store) requestRankings(offset, limit int) []RequestRanking {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if offset < 0 {
+		offset = 0
+	}
 	if limit == 0 {
 		limit = 20
 	}
@@ -307,6 +310,10 @@ func (s *Store) requestRankings(limit int) []RequestRanking {
 		}
 		return rankings[i].Path < rankings[j].Path
 	})
+	if offset >= len(rankings) {
+		return []RequestRanking{}
+	}
+	rankings = rankings[offset:]
 	if limit > 0 && len(rankings) > limit {
 		rankings = rankings[:limit]
 	}
@@ -1010,7 +1017,7 @@ func main() {
 	r.Get("/api/bootstrap", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{
 			"config": store.config(), "config_revision": store.configRevision(),
-			"events": store.recentEvents(500), "request_rankings": store.requestRankings(20),
+			"events": store.recentEvents(500), "request_rankings": store.requestRankings(0, 20),
 			"request_ranking_total": store.requestRankingTotal(),
 		})
 	})
@@ -1078,8 +1085,9 @@ func main() {
 	})
 	r.Get("/api/events", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, http.StatusOK, store.recentEvents(500)) })
 	r.Get("/api/request-rankings", func(w http.ResponseWriter, r *http.Request) {
+		offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 		writeJSON(w, http.StatusOK, map[string]any{
-			"rankings": store.requestRankings(auditLimit(r)), "total": store.requestRankingTotal(),
+			"rankings": store.requestRankings(offset, auditLimit(r)), "total": store.requestRankingTotal(),
 		})
 	})
 	r.Delete("/api/request-rankings", func(w http.ResponseWriter, r *http.Request) {
