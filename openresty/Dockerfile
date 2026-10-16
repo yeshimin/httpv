@@ -1,4 +1,4 @@
-FROM alpine:3.21 AS native-module-build
+FROM alpine:3.24 AS native-module-build
 
 ARG NGINX_VERSION=1.31.1
 RUN apk add --no-cache build-base linux-headers pcre2-dev openssl-dev zlib-dev wget
