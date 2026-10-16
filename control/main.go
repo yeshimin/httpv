@@ -25,6 +25,7 @@ import (
 
 const (
 	maxRecentEvents         = 2_000
+	maxRankedRequestPaths   = 4_096
 	defaultVisualDetailRate = 360
 	visualSummaryInterval   = 500 * time.Millisecond
 	visualRecordTTL         = time.Minute
@@ -236,32 +237,83 @@ func (a *trafficSummaryAccumulator) take(windowEndMS int64) *TrafficSummary {
 }
 
 type Store struct {
-	mu         sync.RWMutex
-	gateway    GatewayConfig
-	revision   uint64
-	revisions  []ConfigRevision
-	events     []TrafficEvent
-	eventStart int
+	mu            sync.RWMutex
+	gateway       GatewayConfig
+	revision      uint64
+	revisions     []ConfigRevision
+	events        []TrafficEvent
+	eventStart    int
+	requestCounts map[string]RequestRanking
+}
+
+type RequestRanking struct {
+	Method string `json:"method"`
+	Path   string `json:"path"`
+	Count  uint64 `json:"count"`
 }
 
 func newStore() *Store {
 	config := defaultGatewayConfig()
 	return &Store{
-		gateway:   config,
-		revision:  1,
-		revisions: []ConfigRevision{{Revision: 1, CreatedAt: time.Now().UnixMilli(), Source: "defaults", Config: cloneGatewayConfig(config)}},
+		gateway:       config,
+		revision:      1,
+		revisions:     []ConfigRevision{{Revision: 1, CreatedAt: time.Now().UnixMilli(), Source: "defaults", Config: cloneGatewayConfig(config)}},
+		requestCounts: map[string]RequestRanking{},
 	}
 }
 
 func (s *Store) addEvent(event TrafficEvent) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if event.Phase == "request_started" {
+		method := event.Method
+		if method == "" {
+			method = http.MethodGet
+		}
+		path := event.Path
+		if path == "" {
+			path = "/"
+		}
+		key := method + "\x00" + path
+		ranking, exists := s.requestCounts[key]
+		if exists || len(s.requestCounts) < maxRankedRequestPaths {
+			ranking.Method = method
+			ranking.Path = path
+			ranking.Count++
+			s.requestCounts[key] = ranking
+		}
+	}
 	if len(s.events) < maxRecentEvents {
 		s.events = append(s.events, event)
 		return
 	}
 	s.events[s.eventStart] = event
 	s.eventStart = (s.eventStart + 1) % maxRecentEvents
+}
+
+func (s *Store) requestRankings(limit int) []RequestRanking {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	rankings := make([]RequestRanking, 0, len(s.requestCounts))
+	for _, ranking := range s.requestCounts {
+		rankings = append(rankings, ranking)
+	}
+	sort.Slice(rankings, func(i, j int) bool {
+		if rankings[i].Count != rankings[j].Count {
+			return rankings[i].Count > rankings[j].Count
+		}
+		if rankings[i].Method != rankings[j].Method {
+			return rankings[i].Method < rankings[j].Method
+		}
+		return rankings[i].Path < rankings[j].Path
+	})
+	if len(rankings) > limit {
+		rankings = rankings[:limit]
+	}
+	return rankings
 }
 
 func (s *Store) recentEvents(limit int) []TrafficEvent {
@@ -945,7 +997,10 @@ func main() {
 	})
 	r.Get("/api/ws", hub.serveWS)
 	r.Get("/api/bootstrap", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"config": store.config(), "config_revision": store.configRevision(), "events": store.recentEvents(500)})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"config": store.config(), "config_revision": store.configRevision(),
+			"events": store.recentEvents(500), "request_rankings": store.requestRankings(20),
+		})
 	})
 	r.Get("/api/config", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-HTTPV-Config-Revision", strconv.FormatUint(store.configRevision(), 10))
@@ -1010,6 +1065,9 @@ func main() {
 		writeJSON(w, http.StatusOK, map[string]any{"revision": revision, "config": store.config()})
 	})
 	r.Get("/api/events", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, http.StatusOK, store.recentEvents(500)) })
+	r.Get("/api/request-rankings", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{"rankings": store.requestRankings(auditLimit(r))})
+	})
 	r.Get("/api/policy-status", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, nativePolicy.status())
 	})

@@ -24,6 +24,7 @@ type AuthStatus = { enabled: boolean; authenticated: boolean; role?: 'viewer' | 
 type CapturedSide = { headers?: Record<string, unknown>; body?: string; truncated?: boolean; content_type?: string; body_unavailable?: string; status?: number }
 type RequestDetails = { request_id: string; subject_id: string; captured_at: number; finished_at?: number; duration_ms?: number; request: CapturedSide; response: CapturedSide }
 type ConfigRevisionSummary = { revision: number; created_at: number; source: string }
+type RequestRanking = { method: string; path: string; count: number }
 
 type Locale = 'zh' | 'en'
 const messages: Record<Locale, Record<string, string>> = {
@@ -54,7 +55,8 @@ const messages: Record<Locale, Record<string, string>> = {
     captureOff: '内容采集尚未开启。后续将按规则限长、脱敏并默认关闭。', managedSubject: '监管对象', topology: '{routes} 条路由 · {upstreams} 个上游',
     signIn: '登录 HTTPV', accessToken: '访问 Token', signInAction: '登录', invalidToken: 'Token 无效或登录失败', signOut: '退出', roleViewer: '只读', roleOperator: '操作员', roleAdmin: '管理员',
     captureSettings: '详情采集', captureStateOn: '已开启', captureStateOff: '已关闭 · 点击配置', captureEnabled: '开启采集', captureRequestHeaders: '请求 Header', captureResponseHeaders: '响应 Header', captureRequestBody: '请求 Body', captureResponseBody: '响应 Body', captureLimit: 'Body 上限', captureTTL: '保留秒数', captureSample: '采样率', captureContentTypes: '允许采集 Body 的 Content-Type（逗号分隔）', captureRedactHeaders: '附加脱敏 Header（逗号分隔）', captureSensitive: '采集内容可能包含敏感数据；鉴权与 Cookie Header 始终强制脱敏。只对保存后的新请求生效。', captureLoading: '正在读取详情…', captureUnavailable: '该请求未采集详情、已过期或当前角色无权读取。', captureTruncated: '内容已截断', saveFailed: '保存失败',
-    gatewayConfig: '网关配置', configValidate: '校验', configApply: '应用配置', configValid: '配置有效', configApplied: '配置已应用', configInvalid: '配置无效', configHistory: '版本历史', configRollback: '回滚', configClose: '关闭', confirmRollback: '确认回滚到版本 {revision}？回滚会生成一个新版本。'
+    gatewayConfig: '网关配置', configValidate: '校验', configApply: '应用配置', configValid: '配置有效', configApplied: '配置已应用', configInvalid: '配置无效', configHistory: '版本历史', configRollback: '回滚', configClose: '关闭', confirmRollback: '确认回滚到版本 {revision}？回滚会生成一个新版本。',
+    requestRanking: '请求排行', requestRankingScope: '本次运行 · 前 20', requestCount: '{count} 次', noRequestRanking: '暂无请求数据。'
   },
   en: {
     commandSurface: 'Traffic command surface', connecting: 'connecting', live: 'live', closed: 'closed',
@@ -83,7 +85,8 @@ const messages: Record<Locale, Record<string, string>> = {
     captureOff: 'Content capture is not enabled. It will be opt-in, size-limited, and redacted.', managedSubject: 'Managed subject', topology: '{routes} routes · {upstreams} upstreams',
     signIn: 'Sign in to HTTPV', accessToken: 'Access token', signInAction: 'Sign in', invalidToken: 'Invalid token or sign-in failed', signOut: 'Sign out', roleViewer: 'viewer', roleOperator: 'operator', roleAdmin: 'admin',
     captureSettings: 'Detail capture', captureStateOn: 'enabled', captureStateOff: 'disabled · click to configure', captureEnabled: 'Enable capture', captureRequestHeaders: 'Request headers', captureResponseHeaders: 'Response headers', captureRequestBody: 'Request body', captureResponseBody: 'Response body', captureLimit: 'Body limit', captureTTL: 'Retention seconds', captureSample: 'Sample rate', captureContentTypes: 'Body Content-Types to capture (comma-separated)', captureRedactHeaders: 'Additional redacted headers (comma-separated)', captureSensitive: 'Captured content may be sensitive; authentication and cookie headers are always redacted. Changes apply only to new requests.', captureLoading: 'Loading details…', captureUnavailable: 'Details were not captured, have expired, or are not available to this role.', captureTruncated: 'Content truncated', saveFailed: 'Save failed',
-    gatewayConfig: 'Gateway configuration', configValidate: 'Validate', configApply: 'Apply configuration', configValid: 'Configuration is valid', configApplied: 'Configuration applied', configInvalid: 'Invalid configuration', configHistory: 'Revision history', configRollback: 'Rollback', configClose: 'Close', confirmRollback: 'Rollback to revision {revision}? Rollback creates a new revision.'
+    gatewayConfig: 'Gateway configuration', configValidate: 'Validate', configApply: 'Apply configuration', configValid: 'Configuration is valid', configApplied: 'Configuration applied', configInvalid: 'Invalid configuration', configHistory: 'Revision history', configRollback: 'Rollback', configClose: 'Close', confirmRollback: 'Rollback to revision {revision}? Rollback creates a new revision.',
+    requestRanking: 'Request ranking', requestRankingScope: 'current run · top 20', requestCount: '{count} requests', noRequestRanking: 'No request data yet.'
   }
 }
 
@@ -122,11 +125,13 @@ const configEditorMessage = ref('')
 const configEditorError = ref(false)
 const configRevision = ref(0)
 const configRevisions = ref<ConfigRevisionSummary[]>([])
+const requestRankings = ref<RequestRanking[]>([])
 const timeoutEventGraceMs = 2_000
 const selectedDetailRetentionMs = 60_000
 let socket: WebSocket | undefined
 let clockTimer: number | undefined
 let policyTimer: number | undefined
+let rankingTimer: number | undefined
 let eventFrame: number | undefined
 const eventQueue: EventMessage[] = []
 const controlReady = computed(() => subjects.value.some((candidate) => candidate.id === subject.value.id))
@@ -342,6 +347,7 @@ async function bootstrap() {
   const current = subjects.value.find((candidate) => candidate.id === subject.value.id) ?? subjects.value[0]
   if (current) subject.value = cloneSubject(current)
   rules.value = data.config.rules
+  requestRankings.value = data.request_rankings ?? requestRankings.value
   const next = new Map<string, TrafficRecord>()
   for (const event of data.events as EventMessage[]) applyEventToMap(event, next)
   const cutoff = Date.now() - 15_000
@@ -359,6 +365,15 @@ async function refreshPolicyStatus() {
     if (response.ok) policyStatus.value = await response.json() as NativePolicyStatus
   } catch {
     // Policy status is advisory; a transient control-plane read must not affect traffic control.
+  }
+}
+
+async function refreshRequestRankings() {
+  try {
+    const response = await apiFetch('/api/request-rankings?limit=20')
+    if (response.ok) requestRankings.value = (await response.json() as { rankings: RequestRanking[] }).rankings
+  } catch {
+    // Rankings are observational and must not affect request control.
   }
 }
 
@@ -649,8 +664,10 @@ async function startConsole() {
     pruneExpiredRecords()
   }, 250)
   policyTimer = window.setInterval(refreshPolicyStatus, 1_000)
+  rankingTimer = window.setInterval(refreshRequestRankings, 1_000)
   try { await bootstrap() } catch (error) { console.error(error) }
   await refreshPolicyStatus()
+  await refreshRequestRankings()
   connect()
 }
 
@@ -688,6 +705,7 @@ onBeforeUnmount(() => {
   socket?.close()
   if (clockTimer) window.clearInterval(clockTimer)
   if (policyTimer) window.clearInterval(policyTimer)
+  if (rankingTimer) window.clearInterval(rankingTimer)
   if (eventFrame !== undefined) window.cancelAnimationFrame(eventFrame)
 })
 </script>
@@ -832,6 +850,19 @@ onBeforeUnmount(() => {
         </template>
         <p v-else class="hint">{{ t('selectHint') }}</p>
       </article>
+
+        <article class="panel ranking-panel">
+          <div class="panel-title ranking-title"><h2>{{ t('requestRanking') }}</h2><small>{{ t('requestRankingScope') }}</small></div>
+          <p v-if="requestRankings.length === 0" class="hint">{{ t('noRequestRanking') }}</p>
+          <div v-else class="ranking-list">
+            <div v-for="(ranking, index) in requestRankings" :key="`${ranking.method}:${ranking.path}`" class="ranking-row" :title="`${ranking.method} ${ranking.path}`">
+              <span class="ranking-index">{{ index + 1 }}</span>
+              <b class="ranking-method" :class="ranking.method.toLowerCase()">{{ ranking.method }}</b>
+              <code>{{ ranking.path }}</code>
+              <strong>{{ t('requestCount', { count: ranking.count }) }}</strong>
+            </div>
+          </div>
+        </article>
 
         <article class="panel rules-panel">
           <h2>{{ t('activeRules') }}</h2>

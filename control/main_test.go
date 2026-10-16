@@ -69,6 +69,25 @@ func TestRecentEventsIsEmptyBeforeTrafficArrives(t *testing.T) {
 	}
 }
 
+func TestRequestRankingsSortByRequestStarts(t *testing.T) {
+	store := newStore()
+	for index := 0; index < 3; index++ {
+		store.addEvent(TrafficEvent{Phase: "request_started", Method: "POST", Path: "/orders"})
+		store.addEvent(TrafficEvent{Phase: "response_finished", Method: "POST", Path: "/orders"})
+	}
+	store.addEvent(TrafficEvent{Phase: "request_started", Method: "GET", Path: "/products"})
+	rankings := store.requestRankings(20)
+	if len(rankings) != 2 {
+		t.Fatalf("got %d rankings, want 2", len(rankings))
+	}
+	if rankings[0].Method != "POST" || rankings[0].Path != "/orders" || rankings[0].Count != 3 {
+		t.Fatalf("unexpected leading ranking: %#v", rankings[0])
+	}
+	if rankings[1].Method != "GET" || rankings[1].Path != "/products" || rankings[1].Count != 1 {
+		t.Fatalf("unexpected second ranking: %#v", rankings[1])
+	}
+}
+
 func TestTrafficSummaryKeepsTopPathsAndControlSignals(t *testing.T) {
 	accumulator := &trafficSummaryAccumulator{paths: map[string]*TrafficPathSummary{}}
 	accumulator.add(TrafficEvent{Phase: "request_started", TimestampMS: 100, SubjectID: "demo", Method: "GET", Path: "/hot"})
