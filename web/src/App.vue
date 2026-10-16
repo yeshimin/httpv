@@ -106,7 +106,6 @@ const detailTab = ref<'overview' | 'headers' | 'body'>('overview')
 const connectionState = ref<'connecting' | 'live' | 'closed'>('connecting')
 const locale = ref<Locale>(localStorage.getItem('httpv-locale') === 'en' ? 'en' : 'zh')
 const nowMs = ref(Date.now())
-const burstBusy = ref(false)
 const overloadSummary = ref<TrafficSummary>()
 const policyStatus = ref<NativePolicyStatus>({ version: 0, state: 'unpublished', acks: [] })
 const authStatus = ref<AuthStatus>({ enabled: false, authenticated: false })
@@ -615,15 +614,13 @@ async function sendTestRequest() {
 }
 
 async function sendBurst() {
-  if (burstBusy.value) return
-  burstBusy.value = true
   try {
     await apiFetch('/api/demo/burst', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ count: 20 })
     })
-  } finally {
-    window.setTimeout(() => { burstBusy.value = false }, 200)
+  } catch {
+    // Each click is independent; the bounded server-side queue provides overload protection.
   }
 }
 
@@ -732,7 +729,7 @@ onBeforeUnmount(() => {
             <button class="gate-toggle" :class="{ active: subject.gate.enabled }" :disabled="!canAdmin" @click="toggleGate">{{ subject.gate.enabled ? t('gateOn') : t('gateOff') }}</button>
             <button v-if="pendingCount > 0" class="emergency-button" :disabled="!canOperate" @click="blockAllPending">{{ t('emergencyBlock') }}</button>
             <button class="outline compact" :disabled="!canOperate" @click="sendTestRequest">{{ t('sendCurrent') }}</button>
-            <button class="outline compact" :disabled="burstBusy || !canOperate" @click="sendBurst">{{ t('burst') }}</button>
+            <button class="outline compact" :disabled="!canOperate" @click="sendBurst">{{ t('burst') }}</button>
             <button class="test-button" :disabled="!canOperate" @click="runGuidedDemo">{{ t('guidedDemo') }}</button>
           </div>
         </div>
