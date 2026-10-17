@@ -41,7 +41,7 @@ type Point = { x: number; y: number }
 type TrailPoint = Point & { at: number; color: number }
 type DynamicParticle = { dot: Graphics; record: TrafficRecord; trail: TrailPoint[]; lastDirection: -1 | 0 | 1; effectColor: number; effectKey: string }
 type StaticParticle = { particle: Particle; record: TrafficRecord; point: Point; key: string }
-type GatewayQueueAssignment = { cell: number }
+type GatewayQueueAssignment = { lane: number; slot: number }
 
 let app: Application | undefined
 let staticContainer: ParticleContainer | undefined
@@ -119,21 +119,8 @@ function waitingAtGateway(record: TrafficRecord) {
     && record.finishedAt === undefined
 }
 
-function gatewayQueueRows(height: number) {
-  const available = Math.max(gatewayLaneHeight, height - 72)
-  const rows = Math.max(1, Math.floor(available / gatewayLaneHeight))
-  return rows % 2 === 0 ? rows - 1 : rows
-}
-
-function gatewayRowOffset(row: number) {
-  if (row === 0) return 0
-  const distance = Math.ceil(row / 2)
-  return row % 2 === 1 ? -distance : distance
-}
-
-function gatewayQueueY(cell: number, height: number) {
-  const center = 42 + (Math.max(43, height - 30) - 42) / 2
-  return center + gatewayRowOffset(Math.floor(cell / gatewayQueueSlots)) * gatewayLaneHeight
+function gatewayLane(record: TrafficRecord, width: number, height: number) {
+  return Math.round(requestPoints(record.requestId, width, height).gateway.y / gatewayLaneHeight)
 }
 
 function syncGatewayQueueAssignments(records: TrafficRecord[]) {
@@ -144,33 +131,33 @@ function syncGatewayQueueAssignments(records: TrafficRecord[]) {
   }
 
   const waiting = records.filter(waitingAtGateway).sort((left, right) => (left.pendingAt ?? left.startedAt) - (right.pendingAt ?? right.startedAt))
-  const capacity = gatewayQueueRows(app.renderer.height) * gatewayQueueSlots
-  const used = new Set<number>()
+  const usedByLane = new Map<number, Set<number>>()
   for (const record of waiting) {
     const assignment = gatewayQueueAssignments.get(record.requestId)
     if (!assignment) continue
-    used.add(assignment.cell)
+    const used = usedByLane.get(assignment.lane) ?? new Set<number>()
+    used.add(assignment.slot)
+    usedByLane.set(assignment.lane, used)
   }
 
   for (const record of waiting) {
     if (gatewayQueueAssignments.has(record.requestId)) continue
-    let cell = 0
-    while (cell < capacity - 1 && used.has(cell)) cell += 1
-    gatewayQueueAssignments.set(record.requestId, { cell })
-    used.add(cell)
+    const lane = gatewayLane(record, app.renderer.width, app.renderer.height)
+    const used = usedByLane.get(lane) ?? new Set<number>()
+    let slot = 0
+    while (slot < gatewayQueueSlots - 1 && used.has(slot)) slot += 1
+    gatewayQueueAssignments.set(record.requestId, { lane, slot })
+    used.add(slot)
+    usedByLane.set(lane, used)
   }
 }
 
-function visualRequestPoints(record: TrafficRecord, width: number, height: number) {
-  const points = requestPoints(record.requestId, width, height)
+function gatewayQueuePoint(record: TrafficRecord, point: Point) {
   const assignment = gatewayQueueAssignments.get(record.requestId)
-  if (!assignment) return points
-  const slot = assignment.cell % gatewayQueueSlots
-  const y = gatewayQueueY(assignment.cell, height)
+  if (!assignment) return point
   return {
-    client: { x: points.client.x, y },
-    gateway: { x: points.gateway.x + gatewayQueueRightOffset - slot * gatewayQueueGap, y },
-    upstream: { x: points.upstream.x, y }
+    x: point.x + gatewayQueueRightOffset - assignment.slot * gatewayQueueGap,
+    y: assignment.lane * gatewayLaneHeight
   }
 }
 
@@ -216,8 +203,8 @@ function drawPersistentTrail(particle: DynamicParticle, position: Point, color: 
 
 function staticPosition(record: TrafficRecord) {
   if (!app) return { x: 0, y: 0 }
-  const points = visualRequestPoints(record, app.renderer.width, app.renderer.height)
-  const gateway = points.gateway
+  const points = requestPoints(record.requestId, app.renderer.width, app.renderer.height)
+  const gateway = gatewayQueuePoint(record, points.gateway)
   if (waitingAtGateway(record)) return gateway
   if (record.abortedAt) return gateway
   if (record.blockedAt || record.responseStartedAt) return gateway
@@ -226,7 +213,7 @@ function staticPosition(record: TrafficRecord) {
 }
 
 function staticKey(record: TrafficRecord, selected: boolean) {
-  return `${record.pendingAt}:${record.releasedAt}:${record.blockedAt}:${record.abortedAt}:${record.responseStartedAt}:${record.finishedAt}:${record.action}:${record.status}:${record.riskLevel}:${record.riskScore}:${gatewayQueueAssignments.get(record.requestId)?.cell}:${selected}`
+  return `${record.pendingAt}:${record.releasedAt}:${record.blockedAt}:${record.abortedAt}:${record.responseStartedAt}:${record.finishedAt}:${record.action}:${record.status}:${record.riskLevel}:${record.riskScore}:${gatewayQueueAssignments.get(record.requestId)?.slot}:${selected}`
 }
 
 function updateStaticParticle(entry: StaticParticle, selected: boolean) {
@@ -460,8 +447,8 @@ function render() {
 
   for (const [id, particle] of dynamicParticles) {
     const record = particle.record
-    const points = visualRequestPoints(record, width, height)
-    const gateway = points.gateway
+    const points = requestPoints(id, width, height)
+    const gateway = gatewayQueuePoint(record, points.gateway)
     const start = record.startedAt + props.renderDelayMs
     if (now < start) {
       particle.dot.visible = false
