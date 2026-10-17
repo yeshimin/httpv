@@ -38,8 +38,7 @@ const emit = defineEmits<{ select: [record: TrafficRecord], selectMany: [records
 const host = ref<HTMLDivElement | null>(null)
 
 type Point = { x: number; y: number }
-type TrailPoint = Point & { at: number; color: number }
-type DynamicParticle = { dot: Graphics; record: TrafficRecord; trail: TrailPoint[]; lastDirection: -1 | 0 | 1; effectColor: number; effectKey: string }
+type DynamicParticle = { dot: Graphics; record: TrafficRecord; lastPosition?: Point; lastDirection: -1 | 0 | 1; trailDistance: number; effectColor: number; effectKey: string }
 type StaticParticle = { particle: Particle; record: TrafficRecord; point: Point; key: string }
 type GatewayQueueAssignment = { lane: number; slot: number }
 
@@ -48,6 +47,10 @@ let staticContainer: ParticleContainer | undefined
 let resizeObserver: ResizeObserver | undefined
 let selectionBox: Graphics | undefined
 let markerTexture: Texture | undefined
+let trailCanvas: HTMLCanvasElement | undefined
+let trailContext: CanvasRenderingContext2D | undefined
+let lastTrailFrame = 0
+let trailInkUntil = 0
 let dragStart: Point | undefined
 let isDragging = false
 
@@ -165,40 +168,76 @@ function interpolate(from: Point, to: Point, progress: number) {
   return { x: from.x + (to.x - from.x) * progress, y: from.y + (to.y - from.y) * progress }
 }
 
-function drawPersistentTrail(particle: DynamicParticle, position: Point, color: number, direction: -1 | 0 | 1, now: number) {
-  const duration = Math.max(100, props.trailMs)
-  const cutoff = now - duration
-  while (particle.trail.length > 0 && particle.trail[0].at < cutoff) particle.trail.shift()
+function colorWithAlpha(color: number, alpha: number) {
+  const red = (color >> 16) & 0xff
+  const green = (color >> 8) & 0xff
+  const blue = color & 0xff
+  return `rgba(${red}, ${green}, ${blue}, ${alpha})`
+}
 
-  const last = particle.trail.at(-1)
-  const distance = last ? Math.hypot(position.x - last.x, position.y - last.y) : Number.POSITIVE_INFINITY
-  const sampleInterval = Math.max(16, duration / 80)
-  const directionChanged = direction !== particle.lastDirection
-  const shouldSample = direction !== 0
-    ? (!last || directionChanged || distance >= 3 || now - last.at >= sampleInterval)
-    : Boolean(last && particle.lastDirection !== 0 && distance >= 0.5)
-  if (shouldSample) particle.trail.push({ ...position, at: now, color })
-  while (particle.trail.length > 80) particle.trail.shift()
-  particle.lastDirection = direction
+function resizeTrailLayer() {
+  if (!trailCanvas || !host.value) return
+  const resolution = Math.min(window.devicePixelRatio || 1, 1.5)
+  trailCanvas.width = Math.max(1, Math.round(host.value.clientWidth * resolution))
+  trailCanvas.height = Math.max(1, Math.round(host.value.clientHeight * resolution))
+  trailContext = trailCanvas.getContext('2d', { alpha: true }) ?? undefined
+  trailContext?.setTransform(resolution, 0, 0, resolution, 0, 0)
+  lastTrailFrame = 0
+  trailInkUntil = 0
+}
 
-  const points = [...particle.trail]
-  if (direction !== 0) points.push({ ...position, at: now, color })
-  for (let index = 1; index < points.length; index += 1) {
-    const from = points[index - 1]
-    const to = points[index]
-    const timeStrength = Math.max(0, Math.min(1, 1 - (now - to.at) / duration))
-    const positionStrength = Math.pow(index / Math.max(1, points.length - 1), 2.35)
-    const strength = timeStrength * positionStrength
-    if (strength <= 0) continue
-    particle.dot
-      .moveTo(from.x - position.x, from.y - position.y)
-      .lineTo(to.x - position.x, to.y - position.y)
-      .stroke({
-        color: to.color,
-        width: 0.35 + strength * 1.35,
-        alpha: 0.01 + Math.pow(strength, 1.65) * 0.54
-      })
+function beginTrailFrame(now: number) {
+  if (!trailContext || !trailCanvas || !host.value) return
+  if (lastTrailFrame === 0) {
+    lastTrailFrame = now
+    return
   }
+  if (now > trailInkUntil) {
+    trailContext.clearRect(0, 0, host.value.clientWidth, host.value.clientHeight)
+    lastTrailFrame = now
+    return
+  }
+  const elapsed = Math.min(64, Math.max(0, now - lastTrailFrame))
+  const duration = Math.max(100, props.trailMs)
+  const fadeAlpha = 1 - Math.exp(-4.6 * elapsed / duration)
+  trailContext.save()
+  trailContext.globalCompositeOperation = 'destination-out'
+  trailContext.fillStyle = `rgba(0, 0, 0, ${fadeAlpha})`
+  trailContext.fillRect(0, 0, host.value.clientWidth, host.value.clientHeight)
+  trailContext.restore()
+  lastTrailFrame = now
+}
+
+function drawPersistentTrail(particle: DynamicParticle, position: Point, color: number, direction: -1 | 0 | 1, now: number, visualAlpha: number) {
+  const previous = particle.lastPosition
+  const continues = direction !== 0 && direction === particle.lastDirection && previous !== undefined
+  if (!continues) particle.trailDistance = 0
+  if (continues && trailContext) {
+    const distance = Math.hypot(position.x - previous.x, position.y - previous.y)
+    if (distance > 0.25) {
+      particle.trailDistance += distance
+      const taperScale = Math.max(1, (host.value?.clientWidth ?? 1) * 0.22)
+      const headStrength = 0.12 + 0.88 * (1 - Math.exp(-particle.trailDistance / taperScale))
+      trailContext.save()
+      trailContext.globalCompositeOperation = 'source-over'
+      trailContext.lineCap = 'butt'
+      trailContext.lineJoin = 'round'
+      trailContext.strokeStyle = colorWithAlpha(color, 1)
+      trailContext.globalAlpha = visualAlpha * headStrength * 0.2
+      trailContext.lineWidth = 4.2
+      trailContext.beginPath()
+      trailContext.moveTo(previous.x, previous.y)
+      trailContext.lineTo(position.x, position.y)
+      trailContext.stroke()
+      trailContext.globalAlpha = visualAlpha * headStrength * 0.74
+      trailContext.lineWidth = 1.25
+      trailContext.stroke()
+      trailContext.restore()
+      trailInkUntil = now + Math.max(100, props.trailMs)
+    }
+  }
+  particle.lastPosition = { ...position }
+  particle.lastDirection = direction
 }
 
 function staticPosition(record: TrafficRecord) {
@@ -253,15 +292,16 @@ function removeStaticParticle(id: string) {
 
 function addDynamicParticle(record: TrafficRecord) {
   if (!app) return
+  const effectColor = effectColorFor(record)
   const dot = new Graphics()
   dot.eventMode = 'none'
   app.stage.addChild(dot)
   dynamicParticles.set(record.requestId, {
     dot,
     record,
-    trail: [],
     lastDirection: 0,
-    effectColor: effectColorFor(record),
+    trailDistance: 0,
+    effectColor,
     effectKey: effectColorKey(record)
   })
 }
@@ -432,6 +472,7 @@ function render() {
   const width = app.renderer.width
   const height = app.renderer.height
   const selectedIds = new Set(props.selectedIds)
+  beginTrailFrame(now)
 
   let staticDirty = false
   for (const [id, entry] of staticParticles) {
@@ -510,7 +551,7 @@ function render() {
     const effectColor = particle.effectColor
     const dotColor = dotColorFor(record)
     particle.dot.clear()
-    drawPersistentTrail(particle, position, effectColor, direction, now)
+    drawPersistentTrail(particle, position, effectColor, direction, now, alpha)
     const selected = selectedIds.has(id)
     const pulseScale = pulse > 0 ? (Math.sin(now / 140) + 1) * 0.3 : 0
     particle.dot.circle(0, 0, (selected ? 3.6 : 2.5) + pulseScale).fill({ color: selected ? 0xf5fbff : dotColor, alpha })
@@ -551,6 +592,11 @@ onMounted(async () => {
   const marker = new Graphics().circle(4, 4, 4).fill(0xffffff)
   markerTexture = app.renderer.generateTexture({ target: marker, frame: new Rectangle(0, 0, 8, 8), antialias: true })
   marker.destroy()
+  trailCanvas = document.createElement('canvas')
+  trailCanvas.className = 'traffic-trail-layer'
+  trailCanvas.setAttribute('aria-hidden', 'true')
+  resizeTrailLayer()
+  host.value.appendChild(trailCanvas)
   host.value.appendChild(app.canvas)
   host.value.addEventListener('pointerdown', onPointerDown)
   host.value.addEventListener('pointermove', onPointerMove)
@@ -561,6 +607,7 @@ onMounted(async () => {
   resizeObserver = new ResizeObserver(() => {
     if (!app || !host.value) return
     app.renderer.resize(host.value.clientWidth, host.value.clientHeight)
+    resizeTrailLayer()
     resetLayers()
   })
   resizeObserver.observe(host.value)
@@ -576,6 +623,9 @@ onBeforeUnmount(() => {
   host.value?.removeEventListener('pointercancel', onPointerUp)
   markerTexture?.destroy(true)
   markerTexture = undefined
+  trailCanvas?.remove()
+  trailCanvas = undefined
+  trailContext = undefined
   app?.destroy(true, { children: true })
 })
 </script>
