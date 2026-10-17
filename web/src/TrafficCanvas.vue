@@ -125,8 +125,8 @@ function updateStaticParticle(entry: StaticParticle, selected: boolean) {
   entry.particle.x = point.x
   entry.particle.y = point.y
   entry.particle.color = selected ? 0xf5fbff : colorFor(entry.record)
-  entry.particle.scaleX = selected ? 1.2 : 0.8
-  entry.particle.scaleY = selected ? 1.2 : 0.8
+  entry.particle.scaleX = selected ? 0.9 : 0.62
+  entry.particle.scaleY = selected ? 0.9 : 0.62
   entry.key = staticKey(entry.record, selected)
 }
 
@@ -139,8 +139,8 @@ function addStaticParticle(record: TrafficRecord, selected: boolean) {
     y: point.y,
     anchorX: 0.5,
     anchorY: 0.5,
-    scaleX: selected ? 1.2 : 0.8,
-    scaleY: selected ? 1.2 : 0.8,
+    scaleX: selected ? 0.9 : 0.62,
+    scaleY: selected ? 0.9 : 0.62,
     tint: selected ? 0xf5fbff : colorFor(record)
   })
   staticContainer.addParticle(particle)
@@ -398,8 +398,8 @@ function render() {
     particle.dot.clear()
     if (direction !== 0) drawFadingTrail(particle.dot, color, direction)
     const selected = selectedIds.has(id)
-    const pulseScale = pulse > 0 ? (Math.sin(now / 140) + 1) * 0.45 : 0
-    particle.dot.circle(0, 0, (selected ? 4.8 : 3.6) + pulseScale).fill({ color: selected ? 0xf5fbff : color, alpha })
+    const pulseScale = pulse > 0 ? (Math.sin(now / 140) + 1) * 0.3 : 0
+    particle.dot.circle(0, 0, (selected ? 3.6 : 2.5) + pulseScale).fill({ color: selected ? 0xf5fbff : color, alpha })
     particle.dot.x = position.x
     particle.dot.y = position.y
     particle.dot.alpha = alpha
