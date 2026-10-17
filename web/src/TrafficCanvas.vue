@@ -2,6 +2,8 @@
 import { Application, Graphics, Particle, ParticleContainer, Rectangle, Texture } from 'pixi.js'
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
+export type TrafficRiskLevel = 'unknown' | 'normal' | 'trusted' | 'suspicious' | 'dangerous'
+
 export type TrafficRecord = {
   requestId: string
   subjectId: string
@@ -20,6 +22,8 @@ export type TrafficRecord = {
   durationMs?: number
   requestBytes?: number
   responseBytes?: number
+  riskLevel?: TrafficRiskLevel
+  riskScore?: number
 }
 
 const props = defineProps<{
@@ -35,7 +39,7 @@ const host = ref<HTMLDivElement | null>(null)
 
 type Point = { x: number; y: number }
 type TrailPoint = Point & { at: number; color: number }
-type DynamicParticle = { dot: Graphics; record: TrafficRecord; trail: TrailPoint[]; lastDirection: -1 | 0 | 1 }
+type DynamicParticle = { dot: Graphics; record: TrafficRecord; trail: TrailPoint[]; lastDirection: -1 | 0 | 1; effectColor: number; effectKey: string }
 type StaticParticle = { particle: Particle; record: TrafficRecord; point: Point; key: string }
 
 let app: Application | undefined
@@ -50,11 +54,27 @@ const dynamicParticles = new Map<string, DynamicParticle>()
 const staticParticles = new Map<string, StaticParticle>()
 const retired = new Set<string>()
 
-function colorFor(record: TrafficRecord): number {
-  if (record.action === 'block' || record.action === 'reject' || record.action === 'abort' || (record.status ?? 0) >= 400) return 0xff5c70
+const riskPalettes: Record<TrafficRiskLevel, readonly number[]> = {
+  unknown: [0x7890a2, 0x8aa3b5, 0x6f8da1],
+  normal: [0x67e8f9, 0x38bdf8, 0x60a5fa, 0x818cf8, 0xa78bfa, 0xc084fc, 0x2dd4bf, 0x22d3ee, 0x7dd3fc, 0x93c5fd],
+  trusted: [0x6ee7b7, 0x4ade80, 0x34d399, 0x22c55e],
+  suspicious: [0xfacc15, 0xfbbf24, 0xfb923c, 0xf59e0b],
+  dangerous: [0xfb7185, 0xf43f5e, 0xef4444, 0xe11d48]
+}
+
+function effectColorFor(record: TrafficRecord): number {
+  const palette = riskPalettes[record.riskLevel ?? 'normal']
+  return palette[Math.min(palette.length - 1, Math.floor(hashFraction(record.requestId, 'effect-color') * palette.length))]
+}
+
+function effectColorKey(record: TrafficRecord) {
+  return `${record.requestId}:${record.riskLevel ?? 'normal'}`
+}
+
+function dotColorFor(record: TrafficRecord): number {
+  if (record.blockedAt !== undefined || record.action === 'block' || record.action === 'reject' || record.action === 'abort') return 0xff4d68
   if (record.pendingAt && !record.releasedAt && !record.finishedAt) return 0xffc857
-  if (record.responseStartedAt) return 0x63e6be
-  return 0x75a7ff
+  return effectColorFor(record)
 }
 
 function terminalAt(record: TrafficRecord) {
@@ -134,7 +154,7 @@ function staticPosition(record: TrafficRecord) {
 }
 
 function staticKey(record: TrafficRecord, selected: boolean) {
-  return `${record.pendingAt}:${record.releasedAt}:${record.blockedAt}:${record.abortedAt}:${record.responseStartedAt}:${record.finishedAt}:${record.action}:${record.status}:${selected}`
+  return `${record.pendingAt}:${record.releasedAt}:${record.blockedAt}:${record.abortedAt}:${record.responseStartedAt}:${record.finishedAt}:${record.action}:${record.status}:${record.riskLevel}:${record.riskScore}:${selected}`
 }
 
 function updateStaticParticle(entry: StaticParticle, selected: boolean) {
@@ -142,7 +162,7 @@ function updateStaticParticle(entry: StaticParticle, selected: boolean) {
   entry.point = point
   entry.particle.x = point.x
   entry.particle.y = point.y
-  entry.particle.color = selected ? 0xf5fbff : colorFor(entry.record)
+  entry.particle.color = selected ? 0xf5fbff : dotColorFor(entry.record)
   entry.particle.scaleX = selected ? 0.9 : 0.62
   entry.particle.scaleY = selected ? 0.9 : 0.62
   entry.key = staticKey(entry.record, selected)
@@ -159,7 +179,7 @@ function addStaticParticle(record: TrafficRecord, selected: boolean) {
     anchorY: 0.5,
     scaleX: selected ? 0.9 : 0.62,
     scaleY: selected ? 0.9 : 0.62,
-    tint: selected ? 0xf5fbff : colorFor(record)
+    tint: selected ? 0xf5fbff : dotColorFor(record)
   })
   staticContainer.addParticle(particle)
   staticParticles.set(record.requestId, { particle, record, point, key: staticKey(record, selected) })
@@ -177,7 +197,14 @@ function addDynamicParticle(record: TrafficRecord) {
   const dot = new Graphics()
   dot.eventMode = 'none'
   app.stage.addChild(dot)
-  dynamicParticles.set(record.requestId, { dot, record, trail: [], lastDirection: 0 })
+  dynamicParticles.set(record.requestId, {
+    dot,
+    record,
+    trail: [],
+    lastDirection: 0,
+    effectColor: effectColorFor(record),
+    effectKey: effectColorKey(record)
+  })
 }
 
 function removeDynamicParticle(id: string) {
@@ -211,7 +238,14 @@ function syncParticles() {
         staticDirty = true
       }
       const entry = dynamicParticles.get(record.requestId)
-      if (entry) entry.record = record
+      if (entry) {
+        entry.record = record
+        const key = effectColorKey(record)
+        if (entry.effectKey !== key) {
+          entry.effectKey = key
+          entry.effectColor = effectColorFor(record)
+        }
+      }
       else addDynamicParticle(record)
     } else {
       if (dynamicParticles.has(record.requestId)) removeDynamicParticle(record.requestId)
@@ -412,12 +446,13 @@ function render() {
       if (responseEnd !== undefined && terminal !== undefined && now > responseEnd) alpha = Math.max(0, 1 - (now - responseEnd) / Math.max(1, props.trailMs))
     }
 
-    const color = colorFor(record)
+    const effectColor = particle.effectColor
+    const dotColor = dotColorFor(record)
     particle.dot.clear()
-    drawPersistentTrail(particle, position, color, direction, now)
+    drawPersistentTrail(particle, position, effectColor, direction, now)
     const selected = selectedIds.has(id)
     const pulseScale = pulse > 0 ? (Math.sin(now / 140) + 1) * 0.3 : 0
-    particle.dot.circle(0, 0, (selected ? 3.6 : 2.5) + pulseScale).fill({ color: selected ? 0xf5fbff : color, alpha })
+    particle.dot.circle(0, 0, (selected ? 3.6 : 2.5) + pulseScale).fill({ color: selected ? 0xf5fbff : dotColor, alpha })
     particle.dot.x = position.x
     particle.dot.y = position.y
     particle.dot.alpha = alpha

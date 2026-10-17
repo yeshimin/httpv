@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import TrafficCanvas, { type TrafficRecord } from './TrafficCanvas.vue'
+import TrafficCanvas, { type TrafficRecord, type TrafficRiskLevel } from './TrafficCanvas.vue'
 
 type Match = { host: string; path_prefix: string; method: string }
 type Gate = { enabled: boolean; timeout_ms: number; timeout_action: 'allow' | 'block'; max_pending: number; overflow_action: 'allow' | 'block' | 'reject'; failure_action: 'allow' | 'block' }
@@ -12,7 +12,7 @@ type Route = { id: string; name: string; enabled: boolean; match: Match; upstrea
 type Rule = { id: string; subject_id?: string; action: string; path_prefix: string; method: string; client_ip: string; created_at: number }
 type EventMessage = {
   phase: string; request_id: string; subject_id: string; timestamp_ms: number; method?: string; path?: string; client_ip?: string;
-  status?: number; duration_ms?: number; request_bytes?: number; response_bytes?: number; action?: string
+  status?: number; duration_ms?: number; request_bytes?: number; response_bytes?: number; action?: string; risk_level?: TrafficRiskLevel; risk_score?: number
 }
 type TrafficSummaryPath = { subject_id: string; method: string; path: string; count: number; blocked: number; pending: number }
 type TrafficSummary = {
@@ -31,7 +31,7 @@ const messages: Record<Locale, Record<string, string>> = {
   zh: {
     commandSurface: '流量指挥台', connecting: '连接中', live: '实时连接', closed: '连接断开',
     tracked: '{count} 条已跟踪 · {pending} 条待决', gateOn: '人工闸门：开启', gateOff: '人工闸门：关闭',
-    sendCurrent: '发送当前请求', guidedDemo: '发送引导演示', request: '请求', response: '响应',
+    sendCurrent: '发送当前请求', guidedDemo: '发送引导演示', request: '请求', response: '响应', identityColor: '请求身份色',
     waiting: '等待人工决定', blocked: '已阻断', tapParticle: '点击流量粒子查看详情', liveState: '实时状态',
     gateActive: '人工闸门已开启。', gateInstruction: '下一个匹配请求将以黄色粒子暂停，直到你选择放行或阻断。',
     ready: '就绪——运行引导演示以生成一条可见请求。', waitingDecision: '正在等待你的决定——点击黄色粒子，然后选择放行或阻断。',
@@ -61,7 +61,7 @@ const messages: Record<Locale, Record<string, string>> = {
   en: {
     commandSurface: 'Traffic command surface', connecting: 'connecting', live: 'live', closed: 'closed',
     tracked: '{count} tracked · {pending} waiting', gateOn: 'Manual gate: ON', gateOff: 'Manual gate: OFF',
-    sendCurrent: 'Send current request', guidedDemo: 'Send guided demo', request: 'request', response: 'response',
+    sendCurrent: 'Send current request', guidedDemo: 'Send guided demo', request: 'request', response: 'response', identityColor: 'request identity color',
     waiting: 'waiting for manual decision', blocked: 'blocked', tapParticle: 'tap a particle for details', liveState: 'Live state',
     gateActive: 'Manual gate is active.', gateInstruction: 'The next matching request will pause as a yellow particle until you select Allow or Block.',
     ready: 'Ready — run the guided demo to create one visible request.', waitingDecision: 'Waiting for your decision — tap the yellow particle, then Allow or Block.',
@@ -258,12 +258,16 @@ function applyEventToMap(event: EventMessage, target: Map<string, TrafficRecord>
     method: event.method ?? 'GET',
     path: event.path ?? '/',
     clientIp: event.client_ip ?? '',
-    startedAt: event.timestamp_ms
+    startedAt: event.timestamp_ms,
+    riskLevel: event.risk_level,
+    riskScore: event.risk_score
   }
   record.method = event.method ?? record.method
   record.path = event.path ?? record.path
   record.clientIp = event.client_ip ?? record.clientIp
   record.requestBytes = event.request_bytes ?? record.requestBytes
+  record.riskLevel = event.risk_level ?? record.riskLevel
+  record.riskScore = event.risk_score ?? record.riskScore
   if (event.phase === 'request_started') record.startedAt = event.timestamp_ms
   if (event.phase === 'request_pending') record.pendingAt = event.timestamp_ms
   if (event.phase === 'response_started') record.responseStartedAt = event.timestamp_ms
@@ -814,7 +818,7 @@ onBeforeUnmount(() => {
           <div class="overload-paths"><button v-for="path in overloadSummary.paths" :key="`${path.subject_id}:${path.method}:${path.path}`" :disabled="!canOperate || !path.path || path.path === 'other'" @click="blockAggregatePath(path)"><span>{{ path.method || '*' }} {{ path.path || '*' }}</span><b>{{ path.count }}</b><em>{{ t('blockFlow') }}</em></button></div>
         </div>
         <TrafficCanvas :records="records" :animated-ids="animatedIds" :render-delay-ms="renderDelayMs" :trail-ms="trailMs" :selected-ids="selectedIds" @select="selectOne" @select-many="selectMany" />
-        <div class="legend"><span class="legend-blue"></span>{{ t('request') }} <span class="legend-green"></span>{{ t('response') }} <span class="legend-yellow"></span>{{ t('waiting') }} <span class="legend-red"></span>{{ t('blocked') }} · {{ t('tapParticle') }} · {{ t('dragSelect') }}</div>
+        <div class="legend"><span class="legend-identity"></span>{{ t('identityColor') }} · → {{ t('request') }} · ← {{ t('response') }} <span class="legend-yellow"></span>{{ t('waiting') }} <span class="legend-red"></span>{{ t('blocked') }} · {{ t('tapParticle') }} · {{ t('dragSelect') }}</div>
         <div class="flow-status" :class="{ waiting: pendingCount > 0 }"><b>{{ t('liveState') }}</b>{{ flowStatus }}</div>
         <div v-if="subject.gate.enabled" class="gate-banner"><b>{{ t('gateActive') }}</b>{{ t('gateInstruction') }}</div>
       </section>
