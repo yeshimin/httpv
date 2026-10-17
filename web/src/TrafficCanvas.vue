@@ -86,6 +86,25 @@ function interpolate(from: Point, to: Point, progress: number) {
   return { x: from.x + (to.x - from.x) * progress, y: from.y + (to.y - from.y) * progress }
 }
 
+function drawFadingTrail(dot: Graphics, color: number, direction: -1 | 1) {
+  const behind = -direction
+  const headGap = 4
+  const trailLength = 48
+  const segments = 10
+  for (let index = segments - 1; index >= 0; index -= 1) {
+    const nearProgress = index / segments
+    const farProgress = (index + 1) / segments
+    const near = headGap + trailLength * nearProgress
+    const far = headGap + trailLength * farProgress
+    const strength = 1 - nearProgress
+    dot.moveTo(behind * far, 0).lineTo(behind * near, 0).stroke({
+      color,
+      width: 0.55 + strength * 1.15,
+      alpha: 0.03 + strength * strength * 0.52
+    })
+  }
+}
+
 function staticPosition(record: TrafficRecord) {
   if (!app) return { x: 0, y: 0 }
   const points = requestPoints(record.requestId, app.renderer.width, app.renderer.height)
@@ -377,14 +396,7 @@ function render() {
 
     const color = colorFor(record)
     particle.dot.clear()
-    particle.dot.moveTo(points.client.x - position.x, 0)
-    particle.dot.lineTo(points.gateway.x - position.x, 0)
-    particle.dot.lineTo(points.upstream.x - position.x, 0)
-    particle.dot.stroke({ color, width: 1, alpha: alpha * 0.14 })
-    if (direction !== 0) {
-      const behind = -direction
-      particle.dot.moveTo(behind * 30, 0).lineTo(behind * 4, 0).stroke({ color, width: 1.5, alpha: alpha * 0.48 })
-    }
+    if (direction !== 0) drawFadingTrail(particle.dot, color, direction)
     const selected = selectedIds.has(id)
     const pulseScale = pulse > 0 ? (Math.sin(now / 140) + 1) * 0.45 : 0
     particle.dot.circle(0, 0, (selected ? 4.8 : 3.6) + pulseScale).fill({ color: selected ? 0xf5fbff : color, alpha })
