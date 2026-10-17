@@ -34,7 +34,8 @@ const emit = defineEmits<{ select: [record: TrafficRecord], selectMany: [records
 const host = ref<HTMLDivElement | null>(null)
 
 type Point = { x: number; y: number }
-type DynamicParticle = { dot: Graphics; record: TrafficRecord }
+type TrailPoint = Point & { at: number; color: number }
+type DynamicParticle = { dot: Graphics; record: TrafficRecord; trail: TrailPoint[]; lastDirection: -1 | 0 | 1 }
 type StaticParticle = { particle: Particle; record: TrafficRecord; point: Point; key: string }
 
 let app: Application | undefined
@@ -86,22 +87,39 @@ function interpolate(from: Point, to: Point, progress: number) {
   return { x: from.x + (to.x - from.x) * progress, y: from.y + (to.y - from.y) * progress }
 }
 
-function drawFadingTrail(dot: Graphics, color: number, direction: -1 | 1) {
-  const behind = -direction
-  const headGap = 4
-  const trailLength = 48
-  const segments = 10
-  for (let index = segments - 1; index >= 0; index -= 1) {
-    const nearProgress = index / segments
-    const farProgress = (index + 1) / segments
-    const near = headGap + trailLength * nearProgress
-    const far = headGap + trailLength * farProgress
-    const strength = 1 - nearProgress
-    dot.moveTo(behind * far, 0).lineTo(behind * near, 0).stroke({
-      color,
-      width: 0.55 + strength * 1.15,
-      alpha: 0.03 + strength * strength * 0.52
-    })
+function drawPersistentTrail(particle: DynamicParticle, position: Point, color: number, direction: -1 | 0 | 1, now: number) {
+  const duration = Math.max(100, props.trailMs)
+  const cutoff = now - duration
+  while (particle.trail.length > 0 && particle.trail[0].at < cutoff) particle.trail.shift()
+
+  const last = particle.trail.at(-1)
+  const distance = last ? Math.hypot(position.x - last.x, position.y - last.y) : Number.POSITIVE_INFINITY
+  const sampleInterval = Math.max(16, duration / 80)
+  const directionChanged = direction !== particle.lastDirection
+  const shouldSample = direction !== 0
+    ? (!last || directionChanged || distance >= 3 || now - last.at >= sampleInterval)
+    : Boolean(last && particle.lastDirection !== 0 && distance >= 0.5)
+  if (shouldSample) particle.trail.push({ ...position, at: now, color })
+  while (particle.trail.length > 80) particle.trail.shift()
+  particle.lastDirection = direction
+
+  const points = [...particle.trail]
+  if (direction !== 0) points.push({ ...position, at: now, color })
+  for (let index = 1; index < points.length; index += 1) {
+    const from = points[index - 1]
+    const to = points[index]
+    const timeStrength = Math.max(0, Math.min(1, 1 - (now - to.at) / duration))
+    const positionStrength = Math.pow(index / Math.max(1, points.length - 1), 2.35)
+    const strength = timeStrength * positionStrength
+    if (strength <= 0) continue
+    particle.dot
+      .moveTo(from.x - position.x, from.y - position.y)
+      .lineTo(to.x - position.x, to.y - position.y)
+      .stroke({
+        color: to.color,
+        width: 0.35 + strength * 1.35,
+        alpha: 0.01 + Math.pow(strength, 1.65) * 0.54
+      })
   }
 }
 
@@ -159,7 +177,7 @@ function addDynamicParticle(record: TrafficRecord) {
   const dot = new Graphics()
   dot.eventMode = 'none'
   app.stage.addChild(dot)
-  dynamicParticles.set(record.requestId, { dot, record })
+  dynamicParticles.set(record.requestId, { dot, record, trail: [], lastDirection: 0 })
 }
 
 function removeDynamicParticle(id: string) {
@@ -396,7 +414,7 @@ function render() {
 
     const color = colorFor(record)
     particle.dot.clear()
-    if (direction !== 0) drawFadingTrail(particle.dot, color, direction)
+    drawPersistentTrail(particle, position, color, direction, now)
     const selected = selectedIds.has(id)
     const pulseScale = pulse > 0 ? (Math.sin(now / 140) + 1) * 0.3 : 0
     particle.dot.circle(0, 0, (selected ? 3.6 : 2.5) + pulseScale).fill({ color: selected ? 0xf5fbff : color, alpha })
