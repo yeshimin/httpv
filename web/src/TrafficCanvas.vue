@@ -41,6 +41,7 @@ type Point = { x: number; y: number }
 type TrailPoint = Point & { at: number; color: number }
 type DynamicParticle = { dot: Graphics; record: TrafficRecord; trail: TrailPoint[]; lastDirection: -1 | 0 | 1; effectColor: number; effectKey: string }
 type StaticParticle = { particle: Particle; record: TrafficRecord; point: Point; key: string }
+type GatewayQueueAssignment = { lane: number; slot: number }
 
 let app: Application | undefined
 let staticContainer: ParticleContainer | undefined
@@ -53,6 +54,12 @@ let isDragging = false
 const dynamicParticles = new Map<string, DynamicParticle>()
 const staticParticles = new Map<string, StaticParticle>()
 const retired = new Set<string>()
+const gatewayQueueAssignments = new Map<string, GatewayQueueAssignment>()
+
+const gatewayQueueSlots = 8
+const gatewayQueueGap = 8
+const gatewayQueueRightOffset = 28
+const gatewayLaneHeight = 6
 
 const riskPalettes: Record<TrafficRiskLevel, readonly number[]> = {
   unknown: [0x7890a2, 0x8aa3b5, 0x6f8da1],
@@ -103,6 +110,57 @@ function requestPoints(requestId: string, width: number, height: number) {
   }
 }
 
+function waitingAtGateway(record: TrafficRecord) {
+  return record.pendingAt !== undefined
+    && record.releasedAt === undefined
+    && record.blockedAt === undefined
+    && record.abortedAt === undefined
+    && record.responseStartedAt === undefined
+    && record.finishedAt === undefined
+}
+
+function gatewayLane(record: TrafficRecord, width: number, height: number) {
+  return Math.round(requestPoints(record.requestId, width, height).gateway.y / gatewayLaneHeight)
+}
+
+function syncGatewayQueueAssignments(records: TrafficRecord[]) {
+  if (!app) return
+  const recordIDs = new Set(records.map((record) => record.requestId))
+  for (const id of gatewayQueueAssignments.keys()) {
+    if (!recordIDs.has(id)) gatewayQueueAssignments.delete(id)
+  }
+
+  const waiting = records.filter(waitingAtGateway).sort((left, right) => (left.pendingAt ?? left.startedAt) - (right.pendingAt ?? right.startedAt))
+  const usedByLane = new Map<number, Set<number>>()
+  for (const record of waiting) {
+    const assignment = gatewayQueueAssignments.get(record.requestId)
+    if (!assignment) continue
+    const used = usedByLane.get(assignment.lane) ?? new Set<number>()
+    used.add(assignment.slot)
+    usedByLane.set(assignment.lane, used)
+  }
+
+  for (const record of waiting) {
+    if (gatewayQueueAssignments.has(record.requestId)) continue
+    const lane = gatewayLane(record, app.renderer.width, app.renderer.height)
+    const used = usedByLane.get(lane) ?? new Set<number>()
+    let slot = 0
+    while (slot < gatewayQueueSlots - 1 && used.has(slot)) slot += 1
+    gatewayQueueAssignments.set(record.requestId, { lane, slot })
+    used.add(slot)
+    usedByLane.set(lane, used)
+  }
+}
+
+function gatewayQueuePoint(record: TrafficRecord, point: Point) {
+  const assignment = gatewayQueueAssignments.get(record.requestId)
+  if (!assignment) return point
+  return {
+    x: point.x + gatewayQueueRightOffset - assignment.slot * gatewayQueueGap,
+    y: point.y
+  }
+}
+
 function interpolate(from: Point, to: Point, progress: number) {
   return { x: from.x + (to.x - from.x) * progress, y: from.y + (to.y - from.y) * progress }
 }
@@ -146,15 +204,16 @@ function drawPersistentTrail(particle: DynamicParticle, position: Point, color: 
 function staticPosition(record: TrafficRecord) {
   if (!app) return { x: 0, y: 0 }
   const points = requestPoints(record.requestId, app.renderer.width, app.renderer.height)
-  if (record.pendingAt && !record.releasedAt && !record.blockedAt && !record.abortedAt && !record.finishedAt) return points.gateway
-  if (record.abortedAt) return points.gateway
-  if (record.blockedAt || record.responseStartedAt) return points.gateway
+  const gateway = gatewayQueuePoint(record, points.gateway)
+  if (waitingAtGateway(record)) return gateway
+  if (record.abortedAt) return gateway
+  if (record.blockedAt || record.responseStartedAt) return gateway
   if (record.finishedAt) return points.client
   return points.upstream
 }
 
 function staticKey(record: TrafficRecord, selected: boolean) {
-  return `${record.pendingAt}:${record.releasedAt}:${record.blockedAt}:${record.abortedAt}:${record.responseStartedAt}:${record.finishedAt}:${record.action}:${record.status}:${record.riskLevel}:${record.riskScore}:${selected}`
+  return `${record.pendingAt}:${record.releasedAt}:${record.blockedAt}:${record.abortedAt}:${record.responseStartedAt}:${record.finishedAt}:${record.action}:${record.status}:${record.riskLevel}:${record.riskScore}:${gatewayQueueAssignments.get(record.requestId)?.slot}:${selected}`
 }
 
 function updateStaticParticle(entry: StaticParticle, selected: boolean) {
@@ -218,6 +277,7 @@ function removeDynamicParticle(id: string) {
 function syncParticles() {
   if (!app || !staticContainer) return
   const recordByID = new Map(props.records.map((record) => [record.requestId, record]))
+  syncGatewayQueueAssignments(props.records)
   const animated = new Set(props.animatedIds)
   const selected = new Set(props.selectedIds)
   let staticDirty = false
@@ -388,6 +448,7 @@ function render() {
   for (const [id, particle] of dynamicParticles) {
     const record = particle.record
     const points = requestPoints(id, width, height)
+    const gateway = gatewayQueuePoint(record, points.gateway)
     const start = record.startedAt + props.renderDelayMs
     if (now < start) {
       particle.dot.visible = false
@@ -395,14 +456,14 @@ function render() {
     }
     particle.dot.visible = true
     const ingressEnd = start + ingressDuration
-    const waitingAtGate = Boolean(record.pendingAt && !record.releasedAt && !record.blockedAt && !record.abortedAt && !record.responseStartedAt)
+    const waitingAtGate = waitingAtGateway(record)
     const forwardStart = Math.max(ingressEnd, (record.releasedAt ?? start) + props.renderDelayMs)
     const forwardEnd = forwardStart + forwardDuration
     const blockedAtGateway = record.blockedAt !== undefined
     const actualResponseStart = record.responseStartedAt === undefined
       ? (record.blockedAt === undefined ? undefined : record.blockedAt + props.renderDelayMs)
       : record.responseStartedAt + props.renderDelayMs
-    const responseOrigin = blockedAtGateway ? points.gateway : points.upstream
+    const responseOrigin = blockedAtGateway ? gateway : points.upstream
     const visualResponseStart = actualResponseStart === undefined ? undefined : Math.max(actualResponseStart, blockedAtGateway ? ingressEnd : forwardEnd)
     const responseEnd = visualResponseStart === undefined ? undefined : visualResponseStart + responseDuration
     const trailEnd = responseEnd === undefined ? undefined : responseEnd + props.trailMs
@@ -415,23 +476,23 @@ function render() {
       continue
     }
 
-    let position = points.gateway
+    let position = gateway
     let alpha = 1
     let pulse = 0
     let direction: -1 | 0 | 1 = 1
-    if (now < ingressEnd) position = interpolate(points.client, points.gateway, (now - start) / ingressDuration)
+    if (now < ingressEnd) position = interpolate(points.client, gateway, (now - start) / ingressDuration)
     else if (record.abortedAt !== undefined) {
-      position = points.gateway
+      position = gateway
       direction = 0
       const fadeStart = record.abortedAt + props.renderDelayMs
       if (now > fadeStart) alpha = Math.max(0, 1 - (now - fadeStart) / Math.max(1, props.trailMs))
     } else if (waitingAtGate) {
-      position = points.gateway
+      position = gateway
       direction = 0
       pulse = 1
     } else if (visualResponseStart === undefined || now < visualResponseStart) {
-      if (now < forwardStart) position = points.gateway
-      else if (now < forwardEnd) position = interpolate(points.gateway, points.upstream, (now - forwardStart) / forwardDuration)
+      if (now < forwardStart) position = gateway
+      else if (now < forwardEnd) position = interpolate(gateway, points.upstream, (now - forwardStart) / forwardDuration)
       else {
         position = points.upstream
         direction = 0
@@ -440,9 +501,9 @@ function render() {
     } else {
       direction = -1
       const progress = Math.min(1, (now - visualResponseStart) / responseDuration)
-      if (blockedAtGateway) position = interpolate(points.gateway, points.client, progress)
-      else if (progress < 0.5) position = interpolate(responseOrigin, points.gateway, progress * 2)
-      else position = interpolate(points.gateway, points.client, (progress - 0.5) * 2)
+      if (blockedAtGateway) position = interpolate(gateway, points.client, progress)
+      else if (progress < 0.5) position = interpolate(responseOrigin, gateway, progress * 2)
+      else position = interpolate(gateway, points.client, (progress - 0.5) * 2)
       if (responseEnd !== undefined && terminal !== undefined && now > responseEnd) alpha = Math.max(0, 1 - (now - responseEnd) / Math.max(1, props.trailMs))
     }
 
@@ -465,6 +526,7 @@ function resetLayers() {
   dynamicParticles.clear()
   staticParticles.clear()
   retired.clear()
+  gatewayQueueAssignments.clear()
   staticContainer = undefined
   selectionBox = undefined
   drawLane()
