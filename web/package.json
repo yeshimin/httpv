@@ -9,7 +9,7 @@
     "test:lifecycle": "node --test test/traffic-lifecycle.test.ts"
   },
   "dependencies": {
-    "pixi.js": "^8.8.1",
+    "pixi.js": "^8.22.0",
     "vue": "^3.5.13"
   },
   "devDependencies": {
