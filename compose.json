@@ -26,7 +26,7 @@
         "HTTPV_PROXY_CONNECT_TIMEOUT": "5s",
         "HTTPV_PROXY_READ_TIMEOUT": "60s",
         "HTTPV_PROXY_SEND_TIMEOUT": "60s",
-        "HTTPV_MAX_BODY_SIZE": "64m",
+        "HTTPV_MAX_BODY_SIZE": "100m",
         "HTTPV_ACCESS_LOG": "off"
       },
       "ports": ["8088:8088", "127.0.0.1:8091:8091"],
