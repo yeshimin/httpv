@@ -51,9 +51,11 @@ Optional variables:
 - `HTTPV_ACCESS_LOG`: Nginx access-log destination; defaults to `off` because
   per-request container logging is expensive under high traffic. Set it to
   `/dev/stdout` when raw access logs are explicitly required.
-- `HTTPV_VISUAL_DETAIL_STARTS_PER_SEC`: per-browser ceiling for new request
-  animations before ordinary events are summarized; default `360`. Pending and
-  operator-decision events remain individually visible.
+- `HTTPV_VISUAL_AGGREGATION`: optional legacy traffic-summary mode; disabled by
+  default so real lifecycle events remain per-request. Set to `true` only when
+  a constrained console deliberately prefers summaries.
+- `HTTPV_VISUAL_DETAIL_STARTS_PER_SEC`: per-browser detailed-start rate used
+  only when `HTTPV_VISUAL_AGGREGATION=true`; default `360` in that mode.
 
 The built-in demo traffic generator is intentionally unbounded and exists only
 for interactive testing. Keep its Operator endpoint behind authentication and

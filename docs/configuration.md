@@ -147,6 +147,23 @@ fully functional but use the Lua compatibility path. This avoids applying one
 subject's native rule to another subject while the multi-subject native format
 is developed.
 
+## Console visualization budget
+
+The traffic controls panel exposes an **Individual animation limit** for the
+current browser. It limits how many request lifecycles receive full motion at
+the same time; excess records remain static, selectable, and actionable. The
+default is `360`, the valid range is `0`–`5000`, and `0` means unlimited within
+the console's retained-record ceiling. The value is stored in browser local
+storage and does not modify the gateway configuration. Admission is sticky:
+an animated request keeps its slot through its complete lifecycle, while a
+request that overflowed into the static layer is never promoted or replayed.
+Changing the limit therefore affects newly arriving requests only.
+
+This concurrent-animation budget changes rendering only. Real lifecycle events
+remain per-request by default. Optional legacy aggregation requires
+`HTTPV_VISUAL_AGGREGATION=true`; its detailed-start rate is then controlled by
+`HTTPV_VISUAL_DETAIL_STARTS_PER_SEC`.
+
 ## Request ranking retention
 
 The control service counts every distinct HTTP method and path observed during

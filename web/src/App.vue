@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
-import TrafficCanvas, { type TrafficRecord, type TrafficRiskLevel } from './TrafficCanvas.vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import TrafficCanvas, { type TrafficRecord } from './TrafficCanvas.vue'
+import { applyTrafficEvent, reconcileAnimationAdmissions, visualExpiry, type TrafficEventMessage } from './traffic-lifecycle'
 
 type Match = { host: string; path_prefix: string; method: string }
 type Gate = { enabled: boolean; timeout_ms: number; timeout_action: 'allow' | 'block'; max_pending: number; overflow_action: 'allow' | 'block' | 'reject'; failure_action: 'allow' | 'block' }
@@ -10,10 +11,7 @@ type UpstreamTarget = { id: string; url: string; host_header: string; weight: nu
 type Upstream = { id: string; name: string; url?: string; host_header?: string; targets: UpstreamTarget[]; max_failures: number; failure_timeout_ms: number }
 type Route = { id: string; name: string; enabled: boolean; match: Match; upstream_id: string }
 type Rule = { id: string; subject_id?: string; action: string; path_prefix: string; method: string; client_ip: string; created_at: number }
-type EventMessage = {
-  phase: string; request_id: string; subject_id: string; timestamp_ms: number; method?: string; path?: string; client_ip?: string;
-  status?: number; duration_ms?: number; request_bytes?: number; response_bytes?: number; action?: string; risk_level?: TrafficRiskLevel; risk_score?: number
-}
+type EventMessage = TrafficEventMessage
 type TrafficSummaryPath = { subject_id: string; method: string; path: string; count: number; blocked: number; pending: number }
 type TrafficSummary = {
   type: 'traffic_summary'; window_start_ms: number; window_end_ms: number; total: number; started: number; responded: number;
@@ -38,7 +36,7 @@ const messages: Record<Locale, Record<string, string>> = {
     flowing: '请求正在流向上游：{method} {path}', returning: '上游已响应——响应正在返回客户端。',
     completed: '已完成：{status}，耗时 {duration}ms。拖尾会短暂保留。', clientAborted: '客户端已断开，请求已经终止。', trafficControls: '流量控制',
     managedPath: '受监管路径', gateTimeout: '闸门超时', timeoutAction: '超时动作', block: '阻断', allow: '放行', maxPending: '最大待决量', overflowAction: '超限动作', failureAction: '异常动作', reject503: '拒绝 503', failOpen: '放行（Fail-open）', failClosed: '阻断（Fail-closed）',
-    regulateTraffic: '监管匹配流量', showEvents: '展示事件', render: '绘制 {value}ms', trail: '拖尾 {value}ms',
+    regulateTraffic: '监管匹配流量', showEvents: '展示事件', render: '绘制 {value}ms', trail: '拖尾 {value}ms', animationLimit: '逐条动画上限', animationLimitHint: '0 = 不限制；仅影响后续新请求',
     selectedRequest: '选中请求', client: '客户端', status: '状态', duration: '耗时', responseSize: '响应大小',
     inFlight: '处理中', unavailable: '不可用', allowPending: '放行待决请求', blockPending: '阻断待决请求',
     blockFuture: '阻断后续匹配流量', selectHint: '点击流量粒子即可查看元数据并执行控制操作。',
@@ -68,7 +66,7 @@ const messages: Record<Locale, Record<string, string>> = {
     flowing: 'Request flowing to upstream: {method} {path}', returning: 'Upstream has responded — response is returning to the client.',
     completed: 'Completed: {status} in {duration}ms. Its trail remains visible briefly.', clientAborted: 'The client disconnected and the request has ended.', trafficControls: 'Traffic controls',
     managedPath: 'Managed path', gateTimeout: 'Gate timeout', timeoutAction: 'On timeout', block: 'Block', allow: 'Allow', maxPending: 'Max pending', overflowAction: 'On overflow', failureAction: 'On failure', reject503: 'Reject 503', failOpen: 'Allow (fail-open)', failClosed: 'Block (fail-closed)',
-    regulateTraffic: 'Regulate matching traffic', showEvents: 'Show events', render: 'Render {value}ms', trail: 'Trail {value}ms',
+    regulateTraffic: 'Regulate matching traffic', showEvents: 'Show events', render: 'Render {value}ms', trail: 'Trail {value}ms', animationLimit: 'Individual animation limit', animationLimitHint: '0 = unlimited; applies to new requests',
     selectedRequest: 'Selected request', client: 'Client', status: 'Status', duration: 'Duration', responseSize: 'Response size',
     inFlight: 'in flight', unavailable: 'not available', allowPending: 'Allow pending', blockPending: 'Block pending',
     blockFuture: 'Block future matches', selectHint: 'Tap a request particle to inspect its metadata and apply a control action.',
@@ -105,6 +103,9 @@ const selectedID = ref<string>()
 const selectedIds = ref<string[]>([])
 const renderDelayMs = ref(0)
 const trailMs = ref(3000)
+const animationLimitStorageKey = 'httpv-animation-limit'
+const storedAnimationLimit = Number.parseInt(localStorage.getItem(animationLimitStorageKey) ?? '', 10)
+const animationLimit = ref(Number.isInteger(storedAnimationLimit) && storedAnimationLimit >= 0 && storedAnimationLimit <= 5_000 ? storedAnimationLimit : 360)
 const detailTab = ref<'overview' | 'headers' | 'body'>('overview')
 const connectionState = ref<'connecting' | 'live' | 'closed'>('connecting')
 const locale = ref<Locale>(localStorage.getItem('httpv-locale') === 'en' ? 'en' : 'zh')
@@ -174,6 +175,12 @@ function onLocaleChange(event: Event) {
   setLocale((event.target as HTMLSelectElement).value as Locale)
 }
 
+function saveAnimationLimit() {
+  const value = Number(animationLimit.value)
+  animationLimit.value = Number.isFinite(value) ? Math.max(0, Math.min(5_000, Math.floor(value))) : 360
+  localStorage.setItem(animationLimitStorageKey, String(animationLimit.value))
+}
+
 function cloneSubject(candidate: Subject): Subject {
   return JSON.parse(JSON.stringify(candidate)) as Subject
 }
@@ -184,6 +191,12 @@ function onSubjectChange(event: Event) {
 }
 
 const records = computed(() => Array.from(traffic.value.values()).sort((a, b) => a.startedAt - b.startedAt))
+const animationAdmissions = new Set<string>()
+const seenForAnimation = new Set<string>()
+const animatedIds = ref<string[]>([])
+watch([records, animationLimit], ([currentRecords]) => {
+  animatedIds.value = reconcileAnimationAdmissions(currentRecords, animationAdmissions, seenForAnimation, animationLimit.value)
+}, { immediate: true })
 const selected = computed(() => selectedID.value ? traffic.value.get(selectedID.value) : undefined)
 const selectedRecords = computed(() => selectedIds.value.map((id) => traffic.value.get(id)).filter((record): record is TrafficRecord => Boolean(record)))
 const pendingCount = computed(() => records.value.filter(isPendingActive).length)
@@ -211,17 +224,6 @@ const batchPendingRemaining = computed(() => {
   if (timeout === 0) return t('pendingInfinite')
   const seconds = pending.map((record) => Math.max(0, Math.ceil((record.pendingAt! + timeout - nowMs.value) / 1000)))
   return t('batchRemaining', { min: Math.min(...seconds), max: Math.max(...seconds) })
-})
-const animatedIds = computed(() => {
-  const selectedSet = new Set(selectedIds.value)
-  const prioritized = [
-    ...records.value.filter((record) => selectedSet.has(record.requestId)),
-    ...records.value.filter((record) => record.pendingAt && !record.releasedAt && !record.blockedAt && !record.abortedAt && !record.finishedAt),
-    ...records.value.slice(-360).reverse()
-  ]
-  const unique = new Set<string>()
-  for (const record of prioritized) if (unique.size < 360) unique.add(record.requestId)
-  return [...unique]
 })
 const selectedPendingLabel = computed(() => {
   const record = selected.value
@@ -251,50 +253,7 @@ const flowStatus = computed(() => {
 })
 
 function applyEventToMap(event: EventMessage, target: Map<string, TrafficRecord>) {
-  const existing = target.get(event.request_id)
-  const record: TrafficRecord = existing ?? {
-    requestId: event.request_id,
-    subjectId: event.subject_id,
-    method: event.method ?? 'GET',
-    path: event.path ?? '/',
-    clientIp: event.client_ip ?? '',
-    startedAt: event.timestamp_ms,
-    riskLevel: event.risk_level,
-    riskScore: event.risk_score
-  }
-  record.method = event.method ?? record.method
-  record.path = event.path ?? record.path
-  record.clientIp = event.client_ip ?? record.clientIp
-  record.requestBytes = event.request_bytes ?? record.requestBytes
-  record.riskLevel = event.risk_level ?? record.riskLevel
-  record.riskScore = event.risk_score ?? record.riskScore
-  if (event.phase === 'request_started') record.startedAt = event.timestamp_ms
-  if (event.phase === 'request_pending') record.pendingAt = event.timestamp_ms
-  if (event.phase === 'response_started') record.responseStartedAt = event.timestamp_ms
-  if (event.phase === 'response_finished') {
-    record.finishedAt = event.timestamp_ms
-    record.status = event.status
-    record.durationMs = event.duration_ms
-    record.responseBytes = event.response_bytes
-  }
-  if (event.phase === 'request_blocked' || event.phase === 'request_timeout' || event.phase === 'request_decided' || event.phase === 'request_overflow') {
-    record.action = event.action
-    if (event.status) record.status = event.status
-  }
-  if ((event.phase === 'request_decided' || event.phase === 'request_timeout' || event.phase === 'request_overflow') && event.action === 'allow') {
-    record.releasedAt = event.timestamp_ms
-  }
-  if (event.phase === 'request_aborted') {
-    record.action = 'abort'
-    record.abortedAt = event.timestamp_ms
-    record.status = event.status ?? 499
-    record.durationMs = event.duration_ms
-  }
-  if ((event.phase === 'request_decided' || event.phase === 'request_blocked' || event.phase === 'request_timeout' || event.phase === 'request_overflow') && (event.action === 'block' || event.action === 'reject')) {
-    record.blockedAt = event.timestamp_ms
-  }
-  target.set(record.requestId, { ...record })
-  if (target.size > 5_000) target.delete(target.keys().next().value as string)
+  applyTrafficEvent(event, target)
 }
 
 function flushEvents() {
@@ -310,12 +269,7 @@ function enqueueEvent(event: EventMessage) {
 }
 
 function recordVisualEnd(record: TrafficRecord) {
-  const terminalAt = record.finishedAt
-    ?? record.blockedAt
-    ?? record.abortedAt
-  if (terminalAt === undefined) return undefined
-  const retention = selectedID.value === record.requestId ? selectedDetailRetentionMs : Math.max(1_000, trailMs.value)
-  return terminalAt + renderDelayMs.value + 420 + retention
+  return visualExpiry(record, renderDelayMs.value, trailMs.value, selectedID.value === record.requestId, selectedDetailRetentionMs)
 }
 
 function pruneExpiredRecords() {
@@ -517,9 +471,12 @@ function connect() {
   socket = new WebSocket(`${protocol}://${location.host}/api/ws`)
   socket.onopen = () => { connectionState.value = 'live' }
   socket.onmessage = (message) => {
-    const payload = JSON.parse(message.data) as EventMessage | TrafficSummary
-    if ('type' in payload && payload.type === 'traffic_summary') applySummary(payload)
-    else enqueueEvent(payload as EventMessage)
+    const decoded = JSON.parse(message.data) as EventMessage | TrafficSummary | Array<EventMessage | TrafficSummary>
+    const payloads = Array.isArray(decoded) ? decoded : [decoded]
+    for (const payload of payloads) {
+      if ('type' in payload && payload.type === 'traffic_summary') applySummary(payload)
+      else enqueueEvent(payload as EventMessage)
+    }
   }
   socket.onclose = () => {
     connectionState.value = 'closed'
@@ -866,6 +823,7 @@ onBeforeUnmount(() => {
           <div class="slider-row">
             <label><span>{{ t('render', { value: renderDelayMs }) }}</span><input v-model.number="renderDelayMs" min="0" max="10000" step="25" type="range" /></label>
             <label><span>{{ t('trail', { value: trailMs }) }}</span><input v-model.number="trailMs" min="100" max="10000" step="100" type="range" /></label>
+            <label :title="t('animationLimitHint')"><span>{{ t('animationLimit') }}</span><input v-model.number="animationLimit" :title="t('animationLimitHint')" min="0" max="5000" step="50" type="number" @change="saveAnimationLimit" /></label>
           </div>
         </article>
 

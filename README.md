@@ -24,15 +24,20 @@ before making data-path changes.
 
 HTTPV treats policy enforcement and browser rendering as separate concerns. A
 managed request is still evaluated by OpenResty even when the browser is under
-load. Each connected console receives up to 360 ordinary request starts per
-second as detailed, clickable request lifecycles. Above that budget, ordinary
-traffic is summarized into 500ms windows by method and path. Waiting-for-manual
-decision and blocked traffic remain individual, actionable records.
+load. By default, every real request lifecycle remains a raw, per-request event;
+the console never replaces those events with aggregate traffic summaries. The
+browser controls cost by assigning full motion to a bounded number of newly
+arriving requests while overflow requests remain static, clickable, and
+actionable. An admitted animation keeps its slot until that request finishes.
 
-The console displays the aggregated rate and its busiest paths, and an operator
-can create a future block rule directly from a displayed aggregate path. This
-prevents a slow browser from adding backpressure to the request path while
-preserving per-request analysis during normal traffic.
+The telemetry and WebSocket queues remain bounded so a slow or disconnected
+console can never add backpressure to the request path. Optional legacy summary
+mode can be enabled explicitly for unusually constrained deployments.
+
+Each browser also has a local concurrent individual-animation limit, configured
+from **Traffic controls → Individual animation limit**. The default is `360`;
+`0` removes the browser-side limit. This setting is stored only in that browser
+and does not change gateway enforcement or raw-event transport.
 
 ## Local control-state recovery
 

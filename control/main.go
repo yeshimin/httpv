@@ -30,6 +30,8 @@ const (
 	visualRecordTTL         = time.Minute
 	hubPriorityQueueSize    = 2_048
 	hubDetailQueueSize      = 16_384
+	priorityBurstLimit      = 32
+	webSocketBatchSize      = 128
 	udpReadBufferBytes      = 16 << 20
 )
 
@@ -371,9 +373,13 @@ type Hub struct {
 }
 
 func newHub() *Hub {
-	detailRate := defaultVisualDetailRate
-	if configured, err := strconv.Atoi(os.Getenv("HTTPV_VISUAL_DETAIL_STARTS_PER_SEC")); err == nil && configured > 0 {
-		detailRate = configured
+	detailRate := 0
+	aggregationEnabled, _ := strconv.ParseBool(os.Getenv("HTTPV_VISUAL_AGGREGATION"))
+	if aggregationEnabled {
+		detailRate = defaultVisualDetailRate
+		if configured, err := strconv.Atoi(os.Getenv("HTTPV_VISUAL_DETAIL_STARTS_PER_SEC")); err == nil && configured > 0 {
+			detailRate = configured
+		}
 	}
 	return &Hub{
 		clients:        map[*client]struct{}{},
@@ -399,6 +405,9 @@ func (c *client) aggregate(event TrafficEvent) {
 }
 
 func (c *client) shouldShowDetail(event TrafficEvent, now time.Time, detailRate int) bool {
+	if detailRate <= 0 {
+		return true
+	}
 	if _, ok := c.visible[event.RequestID]; ok {
 		if terminalEvent(event) {
 			delete(c.visible, event.RequestID)
@@ -451,14 +460,16 @@ func (h *Hub) broadcast(event TrafficEvent) {
 		select {
 		case queue <- payload:
 		default:
-			c.aggregate(event)
+			if h.detailRate > 0 {
+				c.aggregate(event)
+			}
 		}
 	}
 }
 
-// enqueue keeps UDP ingestion independent from browser rendering. Under an
-// overload, lifecycle decisions retain their own queue while ordinary visual
-// detail may be sampled by the already bounded WebSocket path.
+// enqueue keeps UDP ingestion independent from browser rendering. Lifecycle
+// decisions retain their own queue; ordinary raw events use a separate bounded
+// queue so a slow console can never backpressure the data plane.
 func (h *Hub) enqueue(event TrafficEvent) {
 	queue := h.detailEvents
 	if priorityEvent(event) {
@@ -499,26 +510,75 @@ func (h *Hub) flushSummaries(now time.Time) {
 func (h *Hub) run(ctx context.Context) {
 	ticker := time.NewTicker(visualSummaryInterval)
 	defer ticker.Stop()
+	priorityBurst := 0
 	for {
-		// Drain decisions before ordinary detail so operator actions remain
-		// visible even while a large traffic burst is being summarized.
-		select {
-		case event := <-h.priorityEvents:
-			h.broadcast(event)
-			continue
-		default:
+		// Priority events must remain fast, but a continuous manual-gate flood
+		// must not starve response lifecycle events forever.
+		if priorityBurst >= priorityBurstLimit {
+			select {
+			case event := <-h.detailEvents:
+				h.broadcast(event)
+				priorityBurst = 0
+				continue
+			default:
+			}
+		}
+		if priorityBurst < priorityBurstLimit {
+			select {
+			case event := <-h.priorityEvents:
+				h.broadcast(event)
+				priorityBurst++
+				continue
+			default:
+			}
 		}
 		select {
 		case <-ctx.Done():
 			return
 		case event := <-h.priorityEvents:
 			h.broadcast(event)
+			priorityBurst++
 		case event := <-h.detailEvents:
 			h.broadcast(event)
+			priorityBurst = 0
 		case now := <-ticker.C:
 			h.flushSummaries(now)
 		}
 	}
+}
+
+func batchWebSocketMessages(first []byte, queue chan []byte) ([]byte, int) {
+	messages := [][]byte{first}
+	for len(messages) < webSocketBatchSize {
+		select {
+		case message := <-queue:
+			messages = append(messages, message)
+		default:
+			if len(messages) == 1 {
+				return first, 1
+			}
+			payload := make([]byte, 0, len(messages)*len(first)+2)
+			payload = append(payload, '[')
+			for index, message := range messages {
+				if index > 0 {
+					payload = append(payload, ',')
+				}
+				payload = append(payload, message...)
+			}
+			payload = append(payload, ']')
+			return payload, len(messages)
+		}
+	}
+	payload := make([]byte, 0, len(messages)*len(first)+2)
+	payload = append(payload, '[')
+	for index, message := range messages {
+		if index > 0 {
+			payload = append(payload, ',')
+		}
+		payload = append(payload, message...)
+	}
+	payload = append(payload, ']')
+	return payload, len(messages)
 }
 
 func (h *Hub) serveWS(w http.ResponseWriter, r *http.Request) {
@@ -529,8 +589,8 @@ func (h *Hub) serveWS(w http.ResponseWriter, r *http.Request) {
 	}
 	c := &client{
 		conn:     conn,
-		priority: make(chan []byte, 256),
-		detail:   make(chan []byte, 512),
+		priority: make(chan []byte, hubPriorityQueueSize),
+		detail:   make(chan []byte, hubDetailQueueSize),
 		done:     make(chan struct{}),
 		visible:  map[string]time.Time{},
 	}
@@ -539,21 +599,48 @@ func (h *Hub) serveWS(w http.ResponseWriter, r *http.Request) {
 	h.mu.Unlock()
 	go func() {
 		defer conn.Close()
+		priorityBurst := 0
 		for {
 			var message []byte
-			select {
-			case <-c.done:
-				return
-			case message = <-c.priority:
-			default:
+			var queue chan []byte
+			priority := false
+			if priorityBurst >= priorityBurstLimit {
+				select {
+				case <-c.done:
+					return
+				case message = <-c.detail:
+					queue = c.detail
+					priorityBurst = 0
+				default:
+				}
+			}
+			if queue == nil && priorityBurst < priorityBurstLimit {
 				select {
 				case <-c.done:
 					return
 				case message = <-c.priority:
-				case message = <-c.detail:
+					queue = c.priority
+					priority = true
+				default:
 				}
 			}
-			if err := conn.WriteMessage(websocket.TextMessage, message); err != nil {
+			if queue == nil {
+				select {
+				case <-c.done:
+					return
+				case message = <-c.priority:
+					queue = c.priority
+					priority = true
+				case message = <-c.detail:
+					queue = c.detail
+					priorityBurst = 0
+				}
+			}
+			payload, count := batchWebSocketMessages(message, queue)
+			if priority {
+				priorityBurst += count
+			}
+			if err := conn.WriteMessage(websocket.TextMessage, payload); err != nil {
 				return
 			}
 		}

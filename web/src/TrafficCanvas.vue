@@ -1,30 +1,9 @@
 <script setup lang="ts">
 import { Application, Graphics, Particle, ParticleContainer, Rectangle, Texture } from 'pixi.js'
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import type { TrafficRecord, TrafficRiskLevel } from './traffic-lifecycle'
 
-export type TrafficRiskLevel = 'unknown' | 'normal' | 'trusted' | 'suspicious' | 'dangerous'
-
-export type TrafficRecord = {
-  requestId: string
-  subjectId: string
-  method: string
-  path: string
-  clientIp: string
-  startedAt: number
-  pendingAt?: number
-  releasedAt?: number
-  blockedAt?: number
-  abortedAt?: number
-  responseStartedAt?: number
-  finishedAt?: number
-  status?: number
-  action?: string
-  durationMs?: number
-  requestBytes?: number
-  responseBytes?: number
-  riskLevel?: TrafficRiskLevel
-  riskScore?: number
-}
+export type { TrafficRecord, TrafficRiskLevel } from './traffic-lifecycle'
 
 const props = defineProps<{
   records: TrafficRecord[]
@@ -38,7 +17,7 @@ const emit = defineEmits<{ select: [record: TrafficRecord], selectMany: [records
 const host = ref<HTMLDivElement | null>(null)
 
 type Point = { x: number; y: number }
-type DynamicParticle = { dot: Graphics; record: TrafficRecord; lastPosition?: Point; lastDirection: -1 | 0 | 1; trailDistance: number; effectColor: number; effectKey: string }
+type DynamicParticle = { record: TrafficRecord; point: Point; visible: boolean; alpha: number; lastPosition?: Point; lastDirection: -1 | 0 | 1; tailDirection: -1 | 1; tailLength: number; tailStoppedAt?: number; effectColor: number; effectKey: string }
 type StaticParticle = { particle: Particle; record: TrafficRecord; point: Point; key: string }
 type GatewayQueueAssignment = { lane: number; slot: number }
 
@@ -47,10 +26,14 @@ let staticContainer: ParticleContainer | undefined
 let resizeObserver: ResizeObserver | undefined
 let selectionBox: Graphics | undefined
 let markerTexture: Texture | undefined
-let trailCanvas: HTMLCanvasElement | undefined
-let trailContext: CanvasRenderingContext2D | undefined
-let lastTrailFrame = 0
-let trailInkUntil = 0
+let residualCanvas: HTMLCanvasElement | undefined
+let residualContext: CanvasRenderingContext2D | undefined
+let lastResidualFrame = 0
+let residualInkUntil = 0
+let motionCanvas: HTMLCanvasElement | undefined
+let motionContext: CanvasRenderingContext2D | undefined
+const cometSprites = new Map<string, HTMLCanvasElement>()
+const colorStyles = new Map<number, string>()
 let dragStart: Point | undefined
 let isDragging = false
 
@@ -58,6 +41,10 @@ const dynamicParticles = new Map<string, DynamicParticle>()
 const staticParticles = new Map<string, StaticParticle>()
 const retired = new Set<string>()
 const gatewayQueueAssignments = new Map<string, GatewayQueueAssignment>()
+const visualStartTimes = new Map<string, number>()
+const visualReleaseTimes = new Map<string, number>()
+const visualResponseTimes = new Map<string, number>()
+const visualAbortTimes = new Map<string, number>()
 
 const gatewayQueueSlots = 14
 const gatewayQueueGap = 5
@@ -168,73 +155,136 @@ function interpolate(from: Point, to: Point, progress: number) {
   return { x: from.x + (to.x - from.x) * progress, y: from.y + (to.y - from.y) * progress }
 }
 
-function colorWithAlpha(color: number, alpha: number) {
+function colorStyle(color: number) {
+  const cached = colorStyles.get(color)
+  if (cached) return cached
+  const style = `#${color.toString(16).padStart(6, '0')}`
+  colorStyles.set(color, style)
+  return style
+}
+
+function cometSprite(color: number, direction: -1 | 1) {
+  const key = `${color}:${direction}`
+  const cached = cometSprites.get(key)
+  if (cached) return cached
+  const canvas = document.createElement('canvas')
+  canvas.width = 256
+  canvas.height = 16
+  const context = canvas.getContext('2d')
+  if (!context) return canvas
+  const image = context.createImageData(canvas.width, canvas.height)
+  const center = (canvas.height - 1) / 2
   const red = (color >> 16) & 0xff
   const green = (color >> 8) & 0xff
   const blue = color & 0xff
-  return `rgba(${red}, ${green}, ${blue}, ${alpha})`
-}
-
-function resizeTrailLayer() {
-  if (!trailCanvas || !host.value) return
-  const resolution = Math.min(window.devicePixelRatio || 1, 1.5)
-  trailCanvas.width = Math.max(1, Math.round(host.value.clientWidth * resolution))
-  trailCanvas.height = Math.max(1, Math.round(host.value.clientHeight * resolution))
-  trailContext = trailCanvas.getContext('2d', { alpha: true }) ?? undefined
-  trailContext?.setTransform(resolution, 0, 0, resolution, 0, 0)
-  lastTrailFrame = 0
-  trailInkUntil = 0
-}
-
-function beginTrailFrame(now: number) {
-  if (!trailContext || !trailCanvas || !host.value) return
-  if (lastTrailFrame === 0) {
-    lastTrailFrame = now
-    return
-  }
-  if (now > trailInkUntil) {
-    trailContext.clearRect(0, 0, host.value.clientWidth, host.value.clientHeight)
-    lastTrailFrame = now
-    return
-  }
-  const elapsed = Math.min(64, Math.max(0, now - lastTrailFrame))
-  const duration = Math.max(100, props.trailMs)
-  const fadeAlpha = 1 - Math.exp(-4.6 * elapsed / duration)
-  trailContext.save()
-  trailContext.globalCompositeOperation = 'destination-out'
-  trailContext.fillStyle = `rgba(0, 0, 0, ${fadeAlpha})`
-  trailContext.fillRect(0, 0, host.value.clientWidth, host.value.clientHeight)
-  trailContext.restore()
-  lastTrailFrame = now
-}
-
-function drawPersistentTrail(particle: DynamicParticle, position: Point, color: number, direction: -1 | 0 | 1, now: number, visualAlpha: number) {
-  const previous = particle.lastPosition
-  const continues = direction !== 0 && direction === particle.lastDirection && previous !== undefined
-  if (!continues) particle.trailDistance = 0
-  if (continues && trailContext) {
-    const distance = Math.hypot(position.x - previous.x, position.y - previous.y)
-    if (distance > 0.25) {
-      particle.trailDistance += distance
-      const taperScale = Math.max(1, (host.value?.clientWidth ?? 1) * 0.22)
-      const headStrength = 0.12 + 0.88 * (1 - Math.exp(-particle.trailDistance / taperScale))
-      trailContext.save()
-      trailContext.globalCompositeOperation = 'source-over'
-      trailContext.lineCap = 'butt'
-      trailContext.lineJoin = 'round'
-      trailContext.strokeStyle = colorWithAlpha(color, 1)
-      trailContext.globalAlpha = visualAlpha * headStrength * 0.2
-      trailContext.lineWidth = 4.2
-      trailContext.beginPath()
-      trailContext.moveTo(previous.x, previous.y)
-      trailContext.lineTo(position.x, position.y)
-      trailContext.stroke()
-      trailContext.globalAlpha = visualAlpha * headStrength * 0.74
-      trailContext.lineWidth = 1.25
-      trailContext.stroke()
-      trailContext.restore()
-      trailInkUntil = now + Math.max(100, props.trailMs)
+  for (let x = 0; x < canvas.width; x += 1) {
+    const progress = direction === 1 ? x / (canvas.width - 1) : 1 - x / (canvas.width - 1)
+    const longitudinal = Math.pow(progress, 1.35)
+    const halfWidth = 0.2 + progress * 6.8
+    for (let y = 0; y < canvas.height; y += 1) {
+      const edge = Math.max(0, 1 - Math.abs(y - center) / halfWidth)
+      const alpha = Math.round(255 * longitudinal * Math.pow(edge, 0.7) * 0.86)
+      const offset = (y * canvas.width + x) * 4
+      image.data[offset] = red
+      image.data[offset + 1] = green
+      image.data[offset + 2] = blue
+      image.data[offset + 3] = alpha
     }
+  }
+  context.putImageData(image, 0, 0)
+  cometSprites.set(key, canvas)
+  return canvas
+}
+
+function resizeMotionLayer() {
+  if (!motionCanvas || !residualCanvas || !host.value) return
+  const resolution = Math.min(window.devicePixelRatio || 1, 1.5)
+  residualCanvas.width = Math.max(1, Math.round(host.value.clientWidth * resolution))
+  residualCanvas.height = Math.max(1, Math.round(host.value.clientHeight * resolution))
+  residualContext = residualCanvas.getContext('2d', { alpha: true }) ?? undefined
+  residualContext?.setTransform(resolution, 0, 0, resolution, 0, 0)
+  motionCanvas.width = Math.max(1, Math.round(host.value.clientWidth * resolution))
+  motionCanvas.height = Math.max(1, Math.round(host.value.clientHeight * resolution))
+  motionContext = motionCanvas.getContext('2d', { alpha: true }) ?? undefined
+  motionContext?.setTransform(resolution, 0, 0, resolution, 0, 0)
+  lastResidualFrame = 0
+  residualInkUntil = 0
+}
+
+function beginMotionFrame(now: number) {
+  if (!motionContext || !residualContext || !host.value) return
+  motionContext.clearRect(0, 0, host.value.clientWidth, host.value.clientHeight)
+  if (lastResidualFrame === 0) {
+    lastResidualFrame = now
+    return
+  }
+  if (now > residualInkUntil) {
+    residualContext.clearRect(0, 0, host.value.clientWidth, host.value.clientHeight)
+    lastResidualFrame = now
+    return
+  }
+  const elapsed = Math.min(64, Math.max(0, now - lastResidualFrame))
+  const fadeDuration = Math.max(100, props.trailMs)
+  const fadeAlpha = 1 - Math.exp(-7.5 * elapsed / fadeDuration)
+  residualContext.save()
+  residualContext.globalCompositeOperation = 'destination-out'
+  residualContext.fillStyle = `rgba(0, 0, 0, ${fadeAlpha})`
+  residualContext.fillRect(0, 0, host.value.clientWidth, host.value.clientHeight)
+  residualContext.restore()
+  lastResidualFrame = now
+}
+
+function drawDynamicParticle(particle: DynamicParticle, position: Point, direction: -1 | 0 | 1, now: number, visualAlpha: number, dotColor: number, selected: boolean, pulseScale: number) {
+  const maximumLength = Math.max(48, Math.min(110, (host.value?.clientWidth ?? 1) * 0.09))
+  const continues = direction !== 0 && direction === particle.lastDirection && particle.lastPosition !== undefined
+  if (continues && residualContext) {
+    const previous = particle.lastPosition!
+    if (Math.hypot(position.x - previous.x, position.y - previous.y) > 0.25) {
+      residualContext.globalCompositeOperation = 'source-over'
+      residualContext.globalAlpha = visualAlpha * 0.24
+      residualContext.strokeStyle = colorStyle(particle.effectColor)
+      residualContext.lineWidth = 0.8
+      residualContext.lineCap = 'butt'
+      residualContext.beginPath()
+      residualContext.moveTo(previous.x, previous.y)
+      residualContext.lineTo(position.x, position.y)
+      residualContext.stroke()
+      residualContext.globalAlpha = 1
+      residualInkUntil = now + Math.max(100, props.trailMs)
+    }
+  }
+  if (direction !== 0) {
+    if (!continues) particle.tailLength = 0
+    else particle.tailLength = Math.min(maximumLength, particle.tailLength + Math.hypot(
+      position.x - particle.lastPosition!.x,
+      position.y - particle.lastPosition!.y
+    ))
+    particle.tailDirection = direction
+    particle.tailStoppedAt = undefined
+  } else if (particle.lastDirection !== 0 && particle.tailLength > 0) {
+    particle.tailStoppedAt = now
+  }
+
+  const lingerDuration = Math.max(100, props.trailMs)
+  const lingerAlpha = particle.tailStoppedAt === undefined
+    ? (direction === 0 ? 0 : 1)
+    : Math.max(0, 1 - (now - particle.tailStoppedAt) / lingerDuration)
+  particle.point = { ...position }
+  particle.alpha = visualAlpha
+  particle.visible = true
+
+  if (motionContext && particle.tailLength > 1 && lingerAlpha > 0) {
+    motionContext.globalAlpha = visualAlpha * lingerAlpha
+    const tailX = particle.tailDirection === 1 ? position.x - particle.tailLength : position.x
+    motionContext.drawImage(cometSprite(particle.effectColor, particle.tailDirection), tailX, position.y - 4.4, particle.tailLength, 8.8)
+  }
+  if (motionContext) {
+    motionContext.globalAlpha = visualAlpha
+    motionContext.fillStyle = colorStyle(selected ? 0xf5fbff : dotColor)
+    motionContext.beginPath()
+    motionContext.arc(position.x, position.y, (selected ? 3.6 : 2.5) + pulseScale, 0, Math.PI * 2)
+    motionContext.fill()
+    motionContext.globalAlpha = 1
   }
   particle.lastPosition = { ...position }
   particle.lastDirection = direction
@@ -291,32 +341,46 @@ function removeStaticParticle(id: string) {
 }
 
 function addDynamicParticle(record: TrafficRecord) {
-  if (!app) return
   const effectColor = effectColorFor(record)
-  const dot = new Graphics()
-  dot.eventMode = 'none'
-  app.stage.addChild(dot)
   dynamicParticles.set(record.requestId, {
-    dot,
     record,
+    point: { x: 0, y: 0 },
+    visible: false,
+    alpha: 0,
     lastDirection: 0,
-    trailDistance: 0,
+    tailDirection: 1,
+    tailLength: 0,
     effectColor,
     effectKey: effectColorKey(record)
   })
 }
 
 function removeDynamicParticle(id: string) {
-  const entry = dynamicParticles.get(id)
-  if (!entry || !app) return
-  app.stage.removeChild(entry.dot)
-  entry.dot.destroy()
   dynamicParticles.delete(id)
 }
 
 function syncParticles() {
   if (!app || !staticContainer) return
   const recordByID = new Map(props.records.map((record) => [record.requestId, record]))
+  for (const timingMap of [visualStartTimes, visualReleaseTimes, visualResponseTimes, visualAbortTimes]) {
+    for (const id of timingMap.keys()) if (!recordByID.has(id)) timingMap.delete(id)
+  }
+  const observedAt = Date.now()
+  for (const record of props.records) {
+    if (!visualStartTimes.has(record.requestId)) {
+      visualStartTimes.set(record.requestId, Math.max(record.startedAt + props.renderDelayMs, observedAt))
+    }
+    if (record.releasedAt !== undefined && !visualReleaseTimes.has(record.requestId)) {
+      visualReleaseTimes.set(record.requestId, Math.max(record.releasedAt + props.renderDelayMs, observedAt))
+    }
+    const responseAt = record.blockedAt ?? record.responseStartedAt
+    if (responseAt !== undefined && !visualResponseTimes.has(record.requestId)) {
+      visualResponseTimes.set(record.requestId, Math.max(responseAt + props.renderDelayMs, observedAt))
+    }
+    if (record.abortedAt !== undefined && !visualAbortTimes.has(record.requestId)) {
+      visualAbortTimes.set(record.requestId, Math.max(record.abortedAt + props.renderDelayMs, observedAt))
+    }
+  }
   syncGatewayQueueAssignments(props.records)
   const animated = new Set(props.animatedIds)
   const selected = new Set(props.selectedIds)
@@ -393,7 +457,7 @@ function drawSelection(start: Point, end: Point) {
 
 function selectableRecords() {
   return [
-    ...[...dynamicParticles.values()].filter(({ dot }) => dot.visible && dot.alpha > 0).map(({ dot, record }) => ({ record, point: { x: dot.x, y: dot.y } })),
+    ...[...dynamicParticles.values()].filter(({ visible, alpha }) => visible && alpha > 0).map(({ point, record }) => ({ record, point })),
     ...[...staticParticles.values()].map(({ record, point }) => ({ record, point }))
   ]
 }
@@ -464,7 +528,7 @@ function createStaticLayer() {
 }
 
 function render() {
-  if (!app || !staticContainer) return
+  if (!app || !staticContainer || !motionContext) return
   const ingressDuration = 220
   const forwardDuration = 220
   const responseDuration = 420
@@ -472,7 +536,7 @@ function render() {
   const width = app.renderer.width
   const height = app.renderer.height
   const selectedIds = new Set(props.selectedIds)
-  beginTrailFrame(now)
+  beginMotionFrame(now)
 
   let staticDirty = false
   for (const [id, entry] of staticParticles) {
@@ -490,26 +554,34 @@ function render() {
     const record = particle.record
     const points = requestPoints(id, width, height)
     const gateway = gatewayQueuePoint(record, points.gateway)
-    const start = record.startedAt + props.renderDelayMs
+    let start = visualStartTimes.get(id)
+    if (start === undefined) {
+      start = Math.max(record.startedAt + props.renderDelayMs, now)
+      visualStartTimes.set(id, start)
+    }
     if (now < start) {
-      particle.dot.visible = false
+      particle.visible = false
+      particle.alpha = 0
       continue
     }
-    particle.dot.visible = true
     const ingressEnd = start + ingressDuration
     const waitingAtGate = waitingAtGateway(record)
-    const forwardStart = Math.max(ingressEnd, (record.releasedAt ?? start) + props.renderDelayMs)
+    const forwardStart = record.releasedAt === undefined
+      ? ingressEnd
+      : Math.max(ingressEnd, visualReleaseTimes.get(id) ?? record.releasedAt + props.renderDelayMs)
     const forwardEnd = forwardStart + forwardDuration
     const blockedAtGateway = record.blockedAt !== undefined
-    const actualResponseStart = record.responseStartedAt === undefined
-      ? (record.blockedAt === undefined ? undefined : record.blockedAt + props.renderDelayMs)
-      : record.responseStartedAt + props.renderDelayMs
+    const actualResponseStart = record.responseStartedAt === undefined && record.blockedAt === undefined
+      ? undefined
+      : visualResponseTimes.get(id) ?? (record.blockedAt ?? record.responseStartedAt)! + props.renderDelayMs
     const responseOrigin = blockedAtGateway ? gateway : points.upstream
     const visualResponseStart = actualResponseStart === undefined ? undefined : Math.max(actualResponseStart, blockedAtGateway ? ingressEnd : forwardEnd)
     const responseEnd = visualResponseStart === undefined ? undefined : visualResponseStart + responseDuration
     const trailEnd = responseEnd === undefined ? undefined : responseEnd + props.trailMs
     const terminal = terminalAt(record)
-    const abortedTrailEnd = record.abortedAt === undefined ? undefined : record.abortedAt + props.renderDelayMs + Math.max(1_000, props.trailMs)
+    const abortedTrailEnd = record.abortedAt === undefined
+      ? undefined
+      : (visualAbortTimes.get(id) ?? record.abortedAt + props.renderDelayMs) + Math.max(1_000, props.trailMs)
     const visualEnd = abortedTrailEnd ?? trailEnd
     if (terminal !== undefined && visualEnd !== undefined && now > visualEnd) {
       removeDynamicParticle(id)
@@ -548,16 +620,10 @@ function render() {
       if (responseEnd !== undefined && terminal !== undefined && now > responseEnd) alpha = Math.max(0, 1 - (now - responseEnd) / Math.max(1, props.trailMs))
     }
 
-    const effectColor = particle.effectColor
     const dotColor = dotColorFor(record)
-    particle.dot.clear()
-    drawPersistentTrail(particle, position, effectColor, direction, now, alpha)
     const selected = selectedIds.has(id)
     const pulseScale = pulse > 0 ? (Math.sin(now / 140) + 1) * 0.3 : 0
-    particle.dot.circle(0, 0, (selected ? 3.6 : 2.5) + pulseScale).fill({ color: selected ? 0xf5fbff : dotColor, alpha })
-    particle.dot.x = position.x
-    particle.dot.y = position.y
-    particle.dot.alpha = alpha
+    drawDynamicParticle(particle, position, direction, now, alpha, dotColor, selected, pulseScale)
   }
 }
 
@@ -592,12 +658,16 @@ onMounted(async () => {
   const marker = new Graphics().circle(4, 4, 4).fill(0xffffff)
   markerTexture = app.renderer.generateTexture({ target: marker, frame: new Rectangle(0, 0, 8, 8), antialias: true })
   marker.destroy()
-  trailCanvas = document.createElement('canvas')
-  trailCanvas.className = 'traffic-trail-layer'
-  trailCanvas.setAttribute('aria-hidden', 'true')
-  resizeTrailLayer()
-  host.value.appendChild(trailCanvas)
+  residualCanvas = document.createElement('canvas')
+  residualCanvas.className = 'traffic-residual-layer'
+  residualCanvas.setAttribute('aria-hidden', 'true')
+  motionCanvas = document.createElement('canvas')
+  motionCanvas.className = 'traffic-motion-layer'
+  motionCanvas.setAttribute('aria-hidden', 'true')
+  resizeMotionLayer()
   host.value.appendChild(app.canvas)
+  host.value.appendChild(residualCanvas)
+  host.value.appendChild(motionCanvas)
   host.value.addEventListener('pointerdown', onPointerDown)
   host.value.addEventListener('pointermove', onPointerMove)
   host.value.addEventListener('pointerup', onPointerUp)
@@ -607,7 +677,7 @@ onMounted(async () => {
   resizeObserver = new ResizeObserver(() => {
     if (!app || !host.value) return
     app.renderer.resize(host.value.clientWidth, host.value.clientHeight)
-    resizeTrailLayer()
+    resizeMotionLayer()
     resetLayers()
   })
   resizeObserver.observe(host.value)
@@ -623,9 +693,18 @@ onBeforeUnmount(() => {
   host.value?.removeEventListener('pointercancel', onPointerUp)
   markerTexture?.destroy(true)
   markerTexture = undefined
-  trailCanvas?.remove()
-  trailCanvas = undefined
-  trailContext = undefined
+  residualCanvas?.remove()
+  residualCanvas = undefined
+  residualContext = undefined
+  motionCanvas?.remove()
+  motionCanvas = undefined
+  motionContext = undefined
+  cometSprites.clear()
+  colorStyles.clear()
+  visualStartTimes.clear()
+  visualReleaseTimes.clear()
+  visualResponseTimes.clear()
+  visualAbortTimes.clear()
   app?.destroy(true, { children: true })
 })
 </script>

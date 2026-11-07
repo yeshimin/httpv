@@ -200,9 +200,66 @@ func TestHubSendsOverloadSummaryAfterDetailBudget(t *testing.T) {
 }
 
 func TestHubReadsVisualDetailRate(t *testing.T) {
+	t.Setenv("HTTPV_VISUAL_AGGREGATION", "true")
 	t.Setenv("HTTPV_VISUAL_DETAIL_STARTS_PER_SEC", "27")
 	if rate := newHub().detailRate; rate != 27 {
 		t.Fatalf("expected configured detail rate 27, got %d", rate)
+	}
+}
+
+func TestHubDefaultsToRawEvents(t *testing.T) {
+	t.Setenv("HTTPV_VISUAL_AGGREGATION", "false")
+	t.Setenv("HTTPV_VISUAL_DETAIL_STARTS_PER_SEC", "27")
+	hub := newHub()
+	if hub.detailRate != 0 {
+		t.Fatalf("expected aggregation disabled by default, got detail rate %d", hub.detailRate)
+	}
+	client := &client{}
+	if !client.shouldShowDetail(TrafficEvent{Phase: "request_started", RequestID: "raw"}, time.Now(), hub.detailRate) {
+		t.Fatal("raw request event should remain detailed when aggregation is disabled")
+	}
+}
+
+func TestBatchWebSocketMessagesKeepsRawEventsSeparate(t *testing.T) {
+	queue := make(chan []byte, 4)
+	queue <- []byte(`{"phase":"response_started"}`)
+	queue <- []byte(`{"phase":"response_finished"}`)
+	payload, count := batchWebSocketMessages([]byte(`{"phase":"request_started"}`), queue)
+	if count != 3 {
+		t.Fatalf("batched %d events, want 3", count)
+	}
+	if got, want := string(payload), `[{"phase":"request_started"},{"phase":"response_started"},{"phase":"response_finished"}]`; got != want {
+		t.Fatalf("batch payload = %s, want %s", got, want)
+	}
+}
+
+func TestHubPriorityBurstDoesNotStarveDetailLifecycle(t *testing.T) {
+	hub := newHub()
+	client := &client{
+		priority: make(chan []byte, priorityBurstLimit+2),
+		detail:   make(chan []byte, 2),
+		visible:  map[string]time.Time{},
+	}
+	hub.clients[client] = struct{}{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go hub.run(ctx)
+	for index := 0; index < priorityBurstLimit+1; index++ {
+		hub.enqueue(TrafficEvent{Phase: "request_pending", RequestID: fmt.Sprintf("pending-%d", index)})
+	}
+	hub.enqueue(TrafficEvent{Phase: "response_finished", RequestID: "finished"})
+
+	select {
+	case message := <-client.detail:
+		var event TrafficEvent
+		if err := json.Unmarshal(message, &event); err != nil {
+			t.Fatalf("decode detail event: %v", err)
+		}
+		if event.RequestID != "finished" {
+			t.Fatalf("detail event request id = %s, want finished", event.RequestID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("response lifecycle was starved by priority events")
 	}
 }
 

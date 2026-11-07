@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
-    "build": "vue-tsc -b && vite build"
+    "build": "vue-tsc -b && vite build",
+    "test:lifecycle": "node --test test/traffic-lifecycle.test.ts"
   },
   "dependencies": {
     "pixi.js": "^8.8.1",

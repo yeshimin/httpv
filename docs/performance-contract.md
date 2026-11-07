@@ -37,3 +37,17 @@ Before a release can claim a target, it must report:
 - Pending-decision success and timeout rates.
 - Browser FPS/frame-time percentiles at 500, 1,000, 5,000, and 10,000 visual records.
 - Memory use for the edge node, edge agent, and browser tab.
+
+## Lifecycle regression checks
+
+Run these checks before changing event delivery, animation admission, or visual
+expiry behavior:
+
+```sh
+(cd control && go test ./...)
+(cd web && npm run test:lifecycle)
+```
+
+They cover raw-event delivery under a priority flood, complete request terminal
+state, finite visual expiry, and sticky animation admission for overflowed
+requests.
